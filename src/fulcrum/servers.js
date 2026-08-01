@@ -1,10 +1,10 @@
 /**
  * src/fulcrum/servers.js
  *
- * Curated public Fulcrum servers for BCH mainnet. These are anonymous
- * public endpoints — no account, no API key — the same trust model as
- * glnc's public-RPC lists, and the same caveat: a single server is one
- * operator's view of the chain. That's why cascan queries several.
+ * Curated public Fulcrum servers for BCH mainnet. They require no account or
+ * API key. Each carries a maintained operator/infrastructure grouping so the
+ * security quorum counts views rather than endpoint names; those groupings
+ * remain assertions, not cryptographic proof of independent ownership.
  *
  * Ports follow Electrum convention: 50001 TCP, 50002 SSL.
  * 50003/50004 (WS/WSS) are probed by scripts/spike.mjs and recorded in
@@ -51,6 +51,7 @@ export function serverOverride(spec) {
   return [{
     host,
     ports: { tcp: port, ssl: port, ws: port + 1, wss: port + 2 },
-    operator: 'user-specified (--server)',
+    operator: 'user-specified',
+    infrastructure: 'user-specified',
   }];
 }

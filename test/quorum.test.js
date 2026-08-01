@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { queryQuorum } from '../src/fulcrum/quorum.js';
+import {
+  collapseInfrastructureDuplicates,
+  queryQuorum,
+  selectQuorumVoters,
+} from '../src/fulcrum/quorum.js';
 import { AllServersFailedError, QuorumDisagreementError } from '../src/fulcrum/errors.js';
 import { parseArgs } from '../src/cli/args.js';
 import { checkpointHeader } from './checkpoint-fixtures.js';
@@ -56,6 +60,76 @@ async function closeServers(servers) {
 
 test('CLI secure default fans out with majority quorum', () => {
   assert.equal(parseArgs(['gas']).quorum, 'majority');
+});
+
+test('quorum rejects unbounded or malformed policy input', async () => {
+  await assert.rejects(() => queryQuorum('x', [], { mode: 'bogus' }), /mode must be/);
+  await assert.rejects(() => queryQuorum('x', [], { servers: [], minAgreement: 1.5 }), /positive integer/);
+  await assert.rejects(() => queryQuorum('x', [], { servers: [], maxFanout: Number.NaN }), /1 to 32/);
+  await assert.rejects(() => queryQuorum('x', [], { servers: [], maxFanout: 33 }), /1 to 32/);
+});
+
+test('payment voter selection ignores gossip identities and caps after diversity filtering', () => {
+  const servers = [
+    { host: 'fast-gossip.example', ports: { ssl: 50002 } },
+    { host: 'a-1.example', ports: { ssl: 50002 }, operator: 'operator-a', infrastructure: 'infra-a' },
+    { host: 'a-2.example', ports: { ssl: 50002 }, operator: 'operator-a', infrastructure: 'infra-a-2' },
+    { host: 'shared.example', ports: { ssl: 50002 }, operator: 'operator-x', infrastructure: 'infra-a' },
+    { host: 'b.example', ports: { ssl: 50002 }, operator: 'operator-b', infrastructure: 'infra-b' },
+    { host: 'c.example', ports: { ssl: 50002 }, operator: 'operator-c', infrastructure: 'infra-c' },
+  ];
+  const selection = selectQuorumVoters(servers, { paymentMode: true, maxFanout: 2 });
+  assert.deepEqual(selection.selected.map(server => server.operator), ['operator-a', 'operator-b']);
+  assert.deepEqual(selection.excluded.map(server => server.reason), [
+    'unknown-operator',
+    'duplicate-operator',
+    'duplicate-infrastructure',
+    'fanout-limit',
+  ]);
+});
+
+test('payment voter selection rejects unsafe identity strings instead of reflecting them', () => {
+  const selection = selectQuorumVoters([{
+    host: 'host.example',
+    ports: { ssl: 50002 },
+    operator: 'honest\x1b]8;;https://evil.example\x07click',
+    infrastructure: 'infra-a',
+  }], { paymentMode: true, maxFanout: 4 });
+  assert.equal(selection.selected.length, 0);
+  assert.equal(selection.excluded[0].reason, 'unknown-operator');
+  assert.equal(selection.excluded[0].operator, undefined);
+});
+
+test('same IP or TLS certificate forms one transitive infrastructure vote', () => {
+  const collapsed = collapseInfrastructureDuplicates([
+    { server: 'a:50002', operator: 'a', remoteAddress: '1.1.1.1', certificateFingerprint: 'CERT-A' },
+    { server: 'b:50002', operator: 'b', remoteAddress: '1.1.1.1', certificateFingerprint: 'CERT-B' },
+    { server: 'c:50002', operator: 'c', remoteAddress: '2.2.2.2', certificateFingerprint: 'CERT-B' },
+  ], true);
+  assert.deepEqual(collapsed.map(record => record.independent), [true, false, false]);
+  assert.equal(collapsed[1].duplicateOf, 'a:50002');
+  assert.equal(collapsed[2].duplicateOf, 'a:50002');
+});
+
+test('payment quorum fails closed before dialing two aliases of one operator', async () => {
+  const aliases = [
+    { host: 'one.example', ports: { ssl: 50002 }, operator: 'same-operator', infrastructure: 'one-infra' },
+    { host: 'two.example', ports: { ssl: 50002 }, operator: 'same-operator', infrastructure: 'two-infra' },
+  ];
+  await assert.rejects(
+    () => queryQuorum('merchant.balance', [], {
+      mode: 'majority',
+      minAgreement: 2,
+      paymentMode: true,
+      servers: aliases,
+    }),
+    err => {
+      assert.ok(err instanceof QuorumDisagreementError);
+      assert.match(err.message, /1 eligible independent operator/);
+      assert.equal(err.record.servers[0].reason, 'duplicate-operator');
+      return true;
+    },
+  );
 });
 
 test('quorum: discovery-verified TCP transport is reused instead of redialing TLS', async (t) => {
@@ -137,13 +211,19 @@ test('security quorum: two matching independent endpoints satisfy minAgreement=2
   const qr = await queryQuorum('blockchain.address.get_balance', ['address'], {
     mode: 'majority',
     minAgreement: 2,
-    servers: servers.map(server => entry(server)),
+    servers: servers.map((server, index) => entry(server, {
+      operator: `fixture-${index + 1}`,
+      infrastructure: `fixture-${index + 1}`,
+    })),
     allowInsecureTransport: true,
     paymentMode: false,
     timeoutMs: 100,
   });
   assert.equal(qr.agreementCount, 2);
   assert.deepEqual(qr.value, { confirmed: 42 });
+  assert.equal(qr.answeredOperator, 'fixture-1');
+  assert.deepEqual(qr.operators, ['fixture-1', 'fixture-2']);
+  assert.ok(qr.statuses.every(status => status.independent === true));
 });
 
 test('security quorum: a 2–2 tie cannot satisfy minAgreement=2', async (t) => {

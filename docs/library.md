@@ -24,7 +24,7 @@ resolves connected — or throws
 | option | default | meaning |
 |---|---|---|
 | `network` | `'mainnet'` | `'mainnet'` \| `'chipnet'` \| `'testnet4'` — note: chipnet and testnet4 share the `bchtest:` prefix; the `network` option (not the address) selects the chain, and each has its own verified pool + checkpoints |
-| `servers` | discovery | explicit pool (skips endpoint discovery; every serving socket is still checkpoint-verified and subject to the transport policy) |
+| `servers` | discovery | explicit pool (skips endpoint discovery; every serving socket is still checkpoint-verified and subject to the transport policy). Verified mode also requires caller-audited `operator` and `infrastructure` ids on each eligible voter |
 | `discover` | `true` | `false` = curated list only (also: `CASCAN_NO_DISCOVERY=1`) |
 | `verify` | `true` | strict quorum verification on `balance()`/`tx()`/`height()`; `false` is an explicit single-server trade-off |
 | `allowInsecureTransport` | `false` | explicit unauthenticated TLS/TCP escape hatch for diagnostics or non-payment reads; requires `verify: false`, and payment-mode quorum refuses insecure endpoints |
@@ -40,7 +40,7 @@ resolves connected — or throws
 | `tx(txid, {verbose?, verify?})` | `{ tx, receipt? }` | verbose by default; strict quorum verification by default |
 | `height({verify?})` | `number` | current chain tip; strict quorum verification by default |
 | `watch(addr, cb)` | `() => void` unsubscribe | cb fires on every status change — **including changes that happen during a failover gap** |
-| `verify(method, params, {mode?, maxServers?, minAgreement?})` | `{ value, receipt }` | any Electrum method, cross-checked (default `majority`, capped at 4 servers); always requires at least two matching endpoints and rejects plurality/tie results |
+| `verify(method, params, {mode?, maxServers?, minAgreement?})` | `{ value, receipt }` | any Electrum method, cross-checked (default `majority`, capped at 4 independent operators); always requires at least two matching operator votes and rejects plurality/tie results |
 | `request(method, params)` | raw result | escape hatch, still failover-protected |
 | `servers()` | health snapshot | ranked, with visible scores |
 | `network` | string | the connected network |
@@ -48,6 +48,15 @@ resolves connected — or throws
 
 Events (via `bch.on(...)`): `failover` `{from, to, reason}` ·
 `failover-start` · `server-lost` `{server, error}` · `exhausted` `{errors}`.
+
+Default verification separates availability from trust. DNS-seed/gossip
+servers remain in the failover pool but cannot vote on payment data. Built-in
+curated hosts receive maintained operator/infrastructure ids; one vote is
+allowed per id, and matching connected IP addresses or exact TLS certificate
+fingerprints collapse to one vote again. Cached identity claims are ignored.
+Receipts expose `answeredOperator`, the agreeing `operators`, `voterCount`,
+and each endpoint's `independent` status. These labels are maintained
+assertions—not proof against hidden common ownership or collusion.
 
 ## Browser API
 

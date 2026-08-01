@@ -127,6 +127,25 @@ test('cache hardening rejects private, arbitrary-port, and unverified records', 
   assert.equal(hardenCachedServers([{ ...valid, network: 'chipnet' }]), null);
 });
 
+test('cache hardening never trusts serialized operator identity claims', () => {
+  const base = {
+    ports: { ssl: 50002, tcp: 50001 },
+    transport: 'ssl',
+    port: 50002,
+    tlsStrict: true,
+    verified: true,
+    operator: 'attacker-operator',
+    infrastructure: 'attacker-infrastructure',
+  };
+  const unknown = hardenCachedServers([{ ...base, host: '1.1.1.1' }])[0];
+  assert.equal(unknown.operator, undefined);
+  assert.equal(unknown.infrastructure, undefined);
+
+  const curated = hardenCachedServers([{ ...base, host: 'electrum.imaginary.cash' }])[0];
+  assert.equal(curated.operator, 'imaginary.cash');
+  assert.equal(curated.infrastructure, 'imaginary.cash');
+});
+
 test('default curated/discovery records retain public-only dialing through pool and quorum', async () => {
   const resolved = await resolvePool({ discover: false, network: 'mainnet' });
   assert.ok(resolved.servers.length >= 3);

@@ -20,6 +20,10 @@
  *   testnet4 — single-source (testnet4.imaginary.cash, 2026-07-29; the
  *              other known public server was down) — labeled accordingly.
  *              120000 differs from chipnet's 120000, separating the chains.
+ *
+ * Curated `operator`/`infrastructure` ids are conservative maintained
+ * groupings, reviewed 2026-07-31. They prevent endpoint aliases from gaining
+ * votes but are not cryptographic proof of ownership independence.
  */
 
 export const NETWORKS = Object.freeze({
@@ -35,9 +39,9 @@ export const NETWORKS = Object.freeze({
       { height: 556767, hash: '0000000000000000004626ff6e3b936941d341c5932ece4357eeccac44e6d56c' },
     ]),
     curated: Object.freeze([
-      { host: 'electrum.imaginary.cash', ports: { tcp: 50001, ssl: 50002 }, operator: 'imaginary_username (community)' },
-      { host: 'bch.cyberbits.eu', ports: { tcp: 50001, ssl: 50002 }, operator: 'cyberbits.eu' },
-      { host: 'bch.loping.net', ports: { tcp: 50001, ssl: 50002 }, operator: 'loping.net' },
+      { host: 'electrum.imaginary.cash', ports: { tcp: 50001, ssl: 50002 }, operator: 'imaginary.cash', infrastructure: 'imaginary.cash' },
+      { host: 'bch.cyberbits.eu', ports: { tcp: 50001, ssl: 50002 }, operator: 'cyberbits.eu', infrastructure: 'cyberbits.eu' },
+      { host: 'bch.loping.net', ports: { tcp: 50001, ssl: 50002 }, operator: 'loping.net', infrastructure: 'loping.net' },
     ]),
   }),
 
@@ -53,9 +57,9 @@ export const NETWORKS = Object.freeze({
       { height: 300000, hash: '00000000142fbee39fa4ba154cd61677beb9d446cfd43fe80fda4e1579f5d06a' },
     ]),
     curated: Object.freeze([
-      { host: 'chipnet.imaginary.cash', ports: { tcp: 50001, ssl: 50002 }, operator: 'imaginary_username (community)' },
-      { host: 'chipnet.bch.ninja', ports: { tcp: null, ssl: 50002 }, operator: 'bch.ninja' },
-      { host: 'cbch.loping.net', ports: { tcp: 62101, ssl: 62102 }, operator: 'loping.net' },
+      { host: 'chipnet.imaginary.cash', ports: { tcp: 50001, ssl: 50002 }, operator: 'imaginary.cash', infrastructure: 'imaginary.cash' },
+      { host: 'chipnet.bch.ninja', ports: { tcp: null, ssl: 50002 }, operator: 'bch.ninja', infrastructure: 'bch.ninja' },
+      { host: 'cbch.loping.net', ports: { tcp: 62101, ssl: 62102 }, operator: 'loping.net', infrastructure: 'loping.net' },
     ]),
   }),
 
@@ -74,8 +78,8 @@ export const NETWORKS = Object.freeze({
     curated: Object.freeze([
       // Probed 2026-07-29: certificates were invalid. These require the
       // explicit non-payment allowInsecureTransport development mode.
-      { host: 'testnet4.imaginary.cash', ports: { tcp: 50001, ssl: 50002 }, operator: 'imaginary_username (community)', tlsStrict: false },
-      { host: 'tbch4.loping.net', ports: { tcp: 62103, ssl: 62104 }, operator: 'loping.net', tlsStrict: false },
+      { host: 'testnet4.imaginary.cash', ports: { tcp: 50001, ssl: 50002 }, operator: 'imaginary.cash', infrastructure: 'imaginary.cash', tlsStrict: false },
+      { host: 'tbch4.loping.net', ports: { tcp: 62103, ssl: 62104 }, operator: 'loping.net', infrastructure: 'loping.net', tlsStrict: false },
     ]),
   }),
 });
@@ -92,4 +96,18 @@ export function getNetwork(name = 'mainnet') {
     throw new Error(`unknown network: ${JSON.stringify(name)} (expected: ${NETWORK_NAMES.join(', ')})`);
   }
   return net;
+}
+
+/**
+ * Return security-voter metadata only when the host is in today's built-in
+ * registry. Cache and gossip records are untrusted, so callers must derive
+ * this metadata from code rather than accepting serialized claims.
+ */
+export function curatedIdentity(name = 'mainnet', host) {
+  if (typeof host !== 'string') return null;
+  const record = getNetwork(name).curated.find(
+    server => server.host.toLowerCase() === host.toLowerCase(),
+  );
+  if (!record?.operator || !record?.infrastructure) return null;
+  return { operator: record.operator, infrastructure: record.infrastructure };
 }

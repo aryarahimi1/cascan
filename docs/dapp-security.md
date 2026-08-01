@@ -11,7 +11,7 @@ and the ones it must not assume.
 `connect()` enables strict verification by default for `balance()`, `tx()`,
 and `height()`:
 
-- at least two endpoints must return the same value;
+- at least two eligible operator identities must return the same value;
 - a plurality or tie rejects with `QuorumDisagreementError`;
 - invalid BCH heights and malformed/impossible satoshi fields reject;
 - the returned receipt identifies successful, failed, and disagreeing
@@ -40,6 +40,32 @@ public/private DNS answers; restricts gossiped ports; and pins the validated
 DNS answer into the outbound socket. An explicit `servers` pool skips
 automatic discovery and remains caller-controlled, so do not populate it from
 untrusted input.
+
+Discovery improves availability; it does not manufacture trust. Only hosts
+in cascan's built-in curated registry are eligible security voters by
+default. DNS-seed and gossip servers may carry traffic and absorb failover,
+but have no payment-quorum vote. Cached `operator` or `infrastructure`
+claims are discarded and re-derived from the current built-in registry.
+
+Strict quorum counts one vote per operator and per declared infrastructure
+group. After connecting, endpoints that share an observed remote IP address
+or exact TLS certificate fingerprint are collapsed again to one vote. The
+receipt exposes `answeredOperator`, `operators`, `voterCount`, and each
+endpoint's operator/infrastructure and `independent` status.
+
+An explicit `servers` pool is caller-controlled. For its members to vote in
+verified mode, assign stable, independently researched `operator` and
+`infrastructure` ids (lowercase DNS-style ids are recommended). Never derive
+these ids from server gossip, DNS answers, or any other untrusted field:
+
+```js
+await connect({
+  servers: [
+    { host: 'a.example', ports: { ssl: 50002 }, operator: 'org-a', infrastructure: 'host-a' },
+    { host: 'b.example', ports: { ssl: 50002 }, operator: 'org-b', infrastructure: 'host-b' },
+  ],
+});
+```
 
 Discovery does not create a reusable trust token. Every later Node pool and
 quorum socket repeats the selected network's fork-checkpoint checks before it
@@ -85,8 +111,10 @@ or signing material through any Electrum request.
 
 - Checkpoints prove a server follows BCH history at the pinned fork heights;
   they do not prove a current balance, UTXO set, mempool state, or block tip.
-- Two endpoints can be operated by the same party or collude. cascan has no
-  reliable operator-independence or ASN-ownership oracle.
+- Curated operator/infrastructure labels are maintained assertions, not
+  cryptographic identities. Same-IP/certificate collapse catches obvious
+  aliases, but cascan has no reliable global ownership or ASN oracle. Two
+  apparently separate operators may still share hidden control or collude.
 - cascan does not implement transaction-inclusion Merkle proofs or SPV.
   Confirmed-status claims remain quorum-checked endpoint claims.
 - A malicious server can omit a real UTXO or report a stale/spent UTXO.

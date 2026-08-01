@@ -84,6 +84,8 @@ function fakeProbeFactory(behavior) {
         host: b.canonical ?? cand.host,
         ports: cand.ports,
         source: cand.source,
+        ...(cand.operator ? { operator: cand.operator } : {}),
+        ...(cand.infrastructure ? { infrastructure: cand.infrastructure } : {}),
         transport: 'ssl',
         tlsStrict: true,
         software: 'Fake 1.0',
@@ -97,7 +99,12 @@ function fakeProbeFactory(behavior) {
   };
 }
 
-const CURATED = [{ host: 'curated.example', ports: { ssl: 50002, tcp: 50001 } }];
+const CURATED = [{
+  host: 'curated.example',
+  ports: { ssl: 50002, tcp: 50001 },
+  operator: 'curated-operator',
+  infrastructure: 'curated-infrastructure',
+}];
 
 test('discovery: seed IPs and curated candidates are probed without endpoint rewriting', async () => {
   const d = await discoverServers({
@@ -114,7 +121,11 @@ test('discovery: seed IPs and curated candidates are probed without endpoint rew
   assert.ok(d.servers.every(server => server.publicOnly === true));
   assert.ok(d.servers.every(server => server.network === 'mainnet'));
   const seeded = d.servers.find(s => s.host === '1.1.1.1');
+  const curated = d.servers.find(s => s.host === 'curated.example');
   assert.deepEqual(seeded.aliases, []);
+  assert.equal(seeded.operator, undefined, 'DNS seed is availability-only');
+  assert.equal(curated.operator, 'curated-operator');
+  assert.equal(curated.infrastructure, 'curated-infrastructure');
   assert.equal(d.meta.sources.curated, 1);
   assert.equal(d.meta.sources.seed, 1);
 });

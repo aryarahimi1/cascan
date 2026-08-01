@@ -18,6 +18,18 @@ import { quorumServers } from '../fulcrum/servers.js';
 import { isIP } from 'node:net';
 import { isPublicIp } from '../net/public-destination.js';
 import { requireAllowedTransport } from './transport.js';
+import { curatedIdentity } from '../networks.js';
+
+/** Strip serialized identity claims, then re-attach only built-in metadata. */
+function withCuratedIdentity(record, network) {
+  const {
+    operator: _untrustedOperator,
+    infrastructure: _untrustedInfrastructure,
+    ...endpoint
+  } = record;
+  const identity = curatedIdentity(network, record.host);
+  return { ...endpoint, ...(identity ?? {}) };
+}
 
 function prepareRecords(records, opts = {}) {
   const prepared = [];
@@ -30,7 +42,7 @@ function prepareRecords(records, opts = {}) {
       continue;
     }
     prepared.push({
-      ...record,
+      ...withCuratedIdentity(record, opts.network ?? record.network ?? 'mainnet'),
       network: opts.network ?? record.network ?? 'mainnet',
       publicOnly: true,
     });
@@ -54,7 +66,7 @@ export function hardenCachedServers(records, opts = {}) {
     } catch { return null; }
     if (!isAllowedDiscoveryPort(target.port)) return null;
     hardened.push({
-      ...record,
+      ...withCuratedIdentity(record, opts.network ?? record.network ?? 'mainnet'),
       network: opts.network ?? record.network ?? 'mainnet',
       publicOnly: true,
     });
@@ -120,7 +132,8 @@ export function toQuorumEntry(record) {
     ...(record.port != null ? { port: record.port } : {}),
     rejectUnauthorized: record.tlsStrict !== false,
     network: record.network ?? 'mainnet',
-    operator: record.operator ?? record.source ?? 'curated',
+    ...(record.operator ? { operator: record.operator } : {}),
+    ...(record.operator ? { infrastructure: record.infrastructure ?? record.operator } : {}),
     ...(record.publicOnly === true ? { publicOnly: true } : {}),
   };
 }

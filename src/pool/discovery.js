@@ -190,6 +190,8 @@ async function probeCandidate(cand, opts) {
         host: cand.host,
         ports: { ...cand.ports },
         source: cand.source,
+        ...(cand.operator ? { operator: cand.operator } : {}),
+        ...(cand.infrastructure ? { infrastructure: cand.infrastructure } : {}),
         network: opts.networkName,
         transport,
         port,
@@ -248,7 +250,7 @@ export async function discoverServers(options = {}) {
   const rejected = [];
   const seen = new Set(); // dedupe by host
 
-  const addCandidate = (host, ports, source) => {
+  const addCandidate = (host, ports, source, identity = null) => {
     if (!host || isOnion(host) || !isValidHostname(host) || seen.has(host)) return;
     if (isIp(host) && !isPublicIp(host)) {
       rejected.push({ host, reason: 'destination is not a public IP address' });
@@ -256,11 +258,22 @@ export async function discoverServers(options = {}) {
       return;
     }
     seen.add(host);
-    candidates.push({ host, ports, source });
+    candidates.push({
+      host,
+      ports,
+      source,
+      ...(identity?.operator ? { operator: identity.operator } : {}),
+      ...(identity?.infrastructure ? { infrastructure: identity.infrastructure } : {}),
+    });
   };
 
   for (const s of curated) {
-    addCandidate(s.host, { ssl: s.ports.ssl ?? null, tcp: s.ports.tcp ?? null }, 'curated');
+    addCandidate(
+      s.host,
+      { ssl: s.ports.ssl ?? null, tcp: s.ports.tcp ?? null },
+      'curated',
+      { operator: s.operator, infrastructure: s.infrastructure },
+    );
   }
 
   let seedIps = [];

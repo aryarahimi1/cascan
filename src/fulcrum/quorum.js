@@ -2,9 +2,9 @@
  * src/fulcrum/quorum.js
  *
  * Multi-server query helper — the BCH-native port of glnc's v1.2
- * "honest multi-RPC" queryQuorum. A single Fulcrum server is one
- * operator's view of the chain; cascan surfaces disagreement instead
- * of hiding it.
+ * "honest multi-RPC" queryQuorum. Payment mode admits only explicitly
+ * identified operators, counts one vote per operator/infrastructure group,
+ * and surfaces disagreement instead of hiding it.
  *
  * Modes:
  *   any      — sequential fallback; first success wins. Untried servers are
@@ -43,6 +43,107 @@ function stableStringify(v) {
   return '{' + keys.map(k => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
 }
 
+// Identity labels enter receipts and logs. Keep them deliberately boring so
+// caller-provided metadata cannot smuggle control characters or markup into
+// an operator's terminal. Built-in ids use DNS-style names.
+const IDENTITY_RE = /^[a-z0-9](?:[a-z0-9._:-]{0,126}[a-z0-9])?$/i;
+
+function normalizedIdentity(value) {
+  if (typeof value !== 'string' || !IDENTITY_RE.test(value)) return null;
+  return value.toLowerCase();
+}
+
+/**
+ * Pick security voters before applying the fan-out cap. Unknown discovery
+ * peers remain useful for failover but cannot manufacture quorum votes.
+ */
+export function selectQuorumVoters(servers, { paymentMode, maxFanout }) {
+  if (!paymentMode) {
+    return { selected: servers.slice(0, maxFanout), excluded: [] };
+  }
+
+  const selected = [];
+  const excluded = [];
+  const operators = new Set();
+  const infrastructure = new Set();
+
+  for (const entry of servers) {
+    const operator = normalizedIdentity(entry.operator);
+    const infra = normalizedIdentity(entry.infrastructure ?? entry.operator);
+    let reason = null;
+    if (!operator || !infra) reason = 'unknown-operator';
+    else if (operators.has(operator)) reason = 'duplicate-operator';
+    else if (infrastructure.has(infra)) reason = 'duplicate-infrastructure';
+    else if (selected.length >= maxFanout) reason = 'fanout-limit';
+
+    if (reason) {
+      excluded.push({
+        server: serverName(entry),
+        status: 'not-tried',
+        reason,
+        ...(operator ? { operator } : {}),
+        ...(infra ? { infrastructure: infra } : {}),
+      });
+      continue;
+    }
+
+    operators.add(operator);
+    infrastructure.add(infra);
+    selected.push({ ...entry, operator, infrastructure: infra });
+  }
+  return { selected, excluded };
+}
+
+function normalizeRemoteAddress(address) {
+  if (typeof address !== 'string') return null;
+  return address.toLowerCase().replace(/^::ffff:/, '');
+}
+
+/**
+ * Collapse dynamically observed shared infrastructure. Static labels catch
+ * known grouping; connected IP and certificate fingerprints catch aliases
+ * that were not visible in the registry. Transitive matches form one voter.
+ */
+export function collapseInfrastructureDuplicates(responses, paymentMode) {
+  if (!paymentMode) return responses.map(response => ({ ...response, independent: true }));
+
+  const parent = responses.map((_, i) => i);
+  const find = (i) => parent[i] === i ? i : (parent[i] = find(parent[i]));
+  const union = (a, b) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  };
+
+  for (let i = 0; i < responses.length; i++) {
+    for (let j = 0; j < i; j++) {
+      const sameAddress = responses[i].remoteAddress &&
+        responses[i].remoteAddress === responses[j].remoteAddress;
+      const sameCertificate = responses[i].certificateFingerprint &&
+        responses[i].certificateFingerprint === responses[j].certificateFingerprint;
+      if (sameAddress || sameCertificate) union(j, i);
+    }
+  }
+
+  const representatives = new Map();
+  return responses.map((response, index) => {
+    const root = find(index);
+    if (!representatives.has(root)) {
+      representatives.set(root, index);
+      return { ...response, independent: true };
+    }
+    const representative = responses[representatives.get(root)];
+    const reasons = [];
+    if (response.remoteAddress && response.remoteAddress === representative.remoteAddress) reasons.push('shared-ip');
+    if (response.certificateFingerprint && response.certificateFingerprint === representative.certificateFingerprint) reasons.push('shared-certificate');
+    return {
+      ...response,
+      independent: false,
+      duplicateOf: representative.server,
+      duplicateReason: reasons.length ? reasons : ['shared-infrastructure'],
+    };
+  });
+}
+
 /**
  * Run one method against one server with a short-lived client.
  * Optional `extras` run on the same connection after the primary call —
@@ -77,7 +178,22 @@ async function callOne(serverEntry, method, params, opts) {
         extraResults[ex.key] = null;
       }
     }
-    return { server: client.name, value, latencyMs: Date.now() - started, extras: extraResults };
+    const socket = client._socket;
+    const certificate = client.useTls && typeof socket?.getPeerCertificate === 'function'
+      ? socket.getPeerCertificate()
+      : null;
+    return {
+      server: client.name,
+      value,
+      latencyMs: Date.now() - started,
+      extras: extraResults,
+      operator: normalizedIdentity(serverEntry.operator),
+      infrastructure: normalizedIdentity(serverEntry.infrastructure ?? serverEntry.operator),
+      remoteAddress: normalizeRemoteAddress(socket?.remoteAddress),
+      certificateFingerprint: typeof certificate?.fingerprint256 === 'string'
+        ? certificate.fingerprint256.toUpperCase()
+        : null,
+    };
   } finally {
     client.close();
   }
@@ -96,7 +212,8 @@ async function callOne(serverEntry, method, params, opts) {
  *   value: any,
  *   answered: string,           // server whose value was returned
  *   agreement: 'unanimous'|'majority'|'plurality'|'single'|null,
- *   statuses: Array<{ server: string, status: 'ok'|'failed'|'not-tried', latencyMs?: number, error?: string }>,
+ *   statuses: Array<{ server: string, status: 'ok'|'failed'|'not-tried', latencyMs?: number, error?: string,
+ *     operator?: string, infrastructure?: string, independent?: boolean }>,
  *   disagreements: Array,        // empty under 'any'
  *   degraded: Array,             // non-empty when quorum policy degraded
  *   partial: boolean,
@@ -104,13 +221,23 @@ async function callOne(serverEntry, method, params, opts) {
  */
 export async function queryQuorum(method, params = [], opts = {}) {
   let mode = opts.mode ?? 'any';
+  if (!['any', 'majority', 'all'].includes(mode)) {
+    throw new TypeError('mode must be any, majority, or all');
+  }
   const network = getNetwork(opts.network ?? 'mainnet').name;
-  // Default pool is discovery-backed (DNS seed + gossip, cached), curated
-  // as fallback — the hardcoded list is no longer the primary source.
-  let servers = opts.servers ?? await defaultQuorumEntries({ network });
   const timeoutMs = opts.timeoutMs ?? 10_000;
   const extras = opts.extras ?? [];
   const minAgreement = opts.minAgreement ?? 1;
+  if (!Number.isInteger(minAgreement) || minAgreement < 1) {
+    throw new RangeError('minAgreement must be a positive integer');
+  }
+  const maxFanout = opts.maxFanout ?? 4;
+  if (!Number.isInteger(maxFanout) || maxFanout < 1 || maxFanout > 32) {
+    throw new RangeError('maxFanout must be an integer from 1 to 32');
+  }
+  // Default pool is discovery-backed (DNS seed + gossip, cached), curated
+  // as fallback — the hardcoded list is no longer the primary source.
+  let servers = opts.servers ?? await defaultQuorumEntries({ network });
   // Payment verification never permits unauthenticated TLS or cleartext,
   // even if a caller enabled the non-payment escape hatch elsewhere.
   const paymentMode = opts.paymentMode ?? (minAgreement > 1);
@@ -122,8 +249,26 @@ export async function queryQuorum(method, params = [], opts = {}) {
   // Parallel fan-out is capped so a 20-server discovered pool doesn't get
   // hammered by every --quorum majority query; 'any' walks the ranked list
   // sequentially and stops at the first success, so it needs no cap.
-  if (mode !== 'any') {
-    servers = servers.slice(0, opts.maxFanout ?? 4);
+  let excluded = [];
+  if (mode !== 'any' || paymentMode) {
+    const selection = selectQuorumVoters(servers, {
+      paymentMode,
+      maxFanout: mode === 'any' ? servers.length : maxFanout,
+    });
+    servers = selection.selected;
+    excluded = selection.excluded;
+    if (paymentMode && servers.length < minAgreement) {
+      throw new QuorumDisagreementError(
+        `security quorum unavailable: ${servers.length} eligible independent operator(s), ${minAgreement} required for ${method}`,
+        {
+          agreement: null,
+          agreementCount: 0,
+          required: minAgreement,
+          eligibleOperators: servers.map(server => server.operator),
+          servers: excluded,
+        },
+      );
+    }
   }
 
   if (mode === 'any') {
@@ -134,16 +279,27 @@ export async function queryQuorum(method, params = [], opts = {}) {
         const r = await callOne(entry, method, params, {
           timeoutMs, extras, network, allowInsecureTransport,
         });
-        statuses.push({ server: r.server, status: 'ok', latencyMs: r.latencyMs });
+        statuses.push({
+          server: r.server,
+          status: 'ok',
+          latencyMs: r.latencyMs,
+          ...(r.operator ? { operator: r.operator } : {}),
+          ...(r.infrastructure ? { infrastructure: r.infrastructure } : {}),
+          ...(r.remoteAddress ? { remoteAddress: r.remoteAddress } : {}),
+          ...(r.certificateFingerprint ? { certificateFingerprint: r.certificateFingerprint } : {}),
+        });
         for (const rest of servers.slice(statuses.length)) {
           statuses.push({ server: serverName(rest), status: 'not-tried' });
         }
+        statuses.push(...excluded);
         return {
           value: r.value,
           extras: r.extras,
           answered: r.server,
+          answeredOperator: r.operator,
           agreement: null, // single-provider happy path; nothing to compare
           agreementCount: 1,
+          operators: r.operator ? [r.operator] : [],
           statuses,
           disagreements: [],
           degraded: [],
@@ -171,14 +327,6 @@ export async function queryQuorum(method, params = [], opts = {}) {
     }))
   );
 
-  const statuses = settled.map((res, i) => {
-    const name = serverName(servers[i]);
-    if (res.status === 'fulfilled') {
-      return { server: res.value.server, status: 'ok', latencyMs: res.value.latencyMs };
-    }
-    return { server: name, status: 'failed', error: res.reason?.message ?? String(res.reason) };
-  });
-
   const fulfilled = settled.filter(r => r.status === 'fulfilled').map(r => r.value);
   if (fulfilled.length === 0) {
     const rejected = settled.filter(r => r.status === 'rejected').map(r => r.reason);
@@ -190,50 +338,95 @@ export async function queryQuorum(method, params = [], opts = {}) {
     throw new AllServersFailedError(rejected);
   }
 
-  // Group by normalized value; first-response order breaks ties.
-  const groups = new Map(); // norm → { value, servers: string[], extras }
-  for (const f of fulfilled) {
+  const observed = collapseInfrastructureDuplicates(fulfilled, paymentMode);
+  const independent = observed.filter(response => response.independent);
+  let fulfilledIndex = 0;
+  const statuses = settled.map((res, i) => {
+    const entry = servers[i];
+    const name = serverName(entry);
+    if (res.status === 'fulfilled') {
+      const response = observed[fulfilledIndex++];
+      return {
+        server: res.value.server,
+        status: 'ok',
+        latencyMs: res.value.latencyMs,
+        ...(res.value.operator ? { operator: res.value.operator } : {}),
+        ...(res.value.infrastructure ? { infrastructure: res.value.infrastructure } : {}),
+        ...(res.value.remoteAddress ? { remoteAddress: res.value.remoteAddress } : {}),
+        ...(res.value.certificateFingerprint ? { certificateFingerprint: res.value.certificateFingerprint } : {}),
+        independent: response?.independent !== false,
+        ...(response?.duplicateOf ? { duplicateOf: response.duplicateOf } : {}),
+        ...(response?.duplicateReason ? { duplicateReason: response.duplicateReason } : {}),
+      };
+    }
+    return {
+      server: name,
+      status: 'failed',
+      error: res.reason?.message ?? String(res.reason),
+      ...(entry.operator ? { operator: entry.operator } : {}),
+      ...(entry.infrastructure ? { infrastructure: entry.infrastructure } : {}),
+    };
+  });
+  statuses.push(...excluded);
+
+  // Group only independent operator views; aliases remain visible in the
+  // receipt but cannot increase any value's vote count.
+  const groups = new Map(); // norm → { value, responses: object[], extras }
+  for (const f of independent) {
     const norm = normalize(f.value);
-    if (!groups.has(norm)) groups.set(norm, { value: f.value, servers: [], extras: f.extras });
-    groups.get(norm).servers.push(f.server);
+    if (!groups.has(norm)) groups.set(norm, { value: f.value, responses: [], extras: f.extras });
+    groups.get(norm).responses.push(f);
   }
-  const ranked = [...groups.entries()].sort((a, b) => b[1].servers.length - a[1].servers.length);
+  const ranked = [...groups.entries()].sort((a, b) => b[1].responses.length - a[1].responses.length);
   const [pickedNorm, pickedGroup] = ranked[0];
-  const agreementCount = new Set(pickedGroup.servers).size;
+  const agreementCount = pickedGroup.responses.length;
 
   const unanimous = ranked.length === 1;
-  const threshold = Math.floor(fulfilled.length / 2) + 1;
+  const threshold = Math.floor(independent.length / 2) + 1;
   const agreement =
     unanimous ? 'unanimous'
-    : fulfilled.length === 1 ? 'single'
-    : pickedGroup.servers.length >= threshold ? 'majority'
+    : independent.length === 1 ? 'single'
+    : pickedGroup.responses.length >= threshold ? 'majority'
     : 'plurality';
 
-  const serverRecords = fulfilled.map(f => ({
+  const serverRecords = observed.map(f => ({
     server: f.server,
     value: f.value,
     agreed: normalize(f.value) === pickedNorm,
+    ...(f.operator ? { operator: f.operator } : {}),
+    ...(f.infrastructure ? { infrastructure: f.infrastructure } : {}),
+    independent: f.independent,
+    ...(f.duplicateOf ? { duplicateOf: f.duplicateOf } : {}),
   }));
 
   const disagreements = unanimous ? [] : [{
     agreement,
     servers: serverRecords,
-    picked: { server: pickedGroup.servers[0], value: pickedGroup.value },
+    picked: { server: pickedGroup.responses[0].server, value: pickedGroup.value },
   }];
 
   const degraded = [];
-  if (fulfilled.length < 2) {
+  if (independent.length < 2) {
     degraded.push({
       requested: mode,
       agreement: 'single',
-      fulfilledCount: fulfilled.length,
+      fulfilledCount: independent.length,
+      totalCount: servers.length,
+    });
+  }
+  if (observed.length > independent.length) {
+    degraded.push({
+      requested: mode,
+      reason: 'shared-infrastructure',
+      fulfilledCount: observed.length,
+      independentCount: independent.length,
       totalCount: servers.length,
     });
   }
 
   if (mode === 'all' && !unanimous) {
     throw new QuorumDisagreementError(
-      `--quorum=all: ${ranked.length} distinct values from ${fulfilled.length} servers for ${method}`,
+      `--quorum=all: ${ranked.length} distinct values from ${independent.length} independent operators for ${method}`,
       { agreement, servers: serverRecords }
     );
   }
@@ -268,9 +461,12 @@ export async function queryQuorum(method, params = [], opts = {}) {
   return {
     value: pickedGroup.value,
     extras: pickedGroup.extras,
-    answered: pickedGroup.servers[0],
+    answered: pickedGroup.responses[0].server,
+    answeredOperator: pickedGroup.responses[0].operator,
     agreement,
     agreementCount,
+    operators: pickedGroup.responses.map(response => response.operator).filter(Boolean),
+    voterCount: independent.length,
     statuses,
     disagreements,
     degraded,
@@ -285,8 +481,11 @@ export function fulcrumMeta(qr, extra = {}) {
   return {
     ok: true,
     answered: qr.answered,
+    ...(qr.answeredOperator ? { answeredOperator: qr.answeredOperator } : {}),
     agreement: qr.agreement,
     agreementCount: qr.agreementCount,
+    ...(Array.isArray(qr.operators) ? { operators: qr.operators } : {}),
+    ...(qr.voterCount != null ? { voterCount: qr.voterCount } : {}),
     ...(extra.height != null ? { height: extra.height } : {}),
     servers: qr.statuses,
     disagreements: qr.disagreements,

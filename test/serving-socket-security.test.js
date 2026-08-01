@@ -162,6 +162,8 @@ function tcpEntry(server) {
     transport: 'tcp',
     port,
     tlsStrict: false,
+    operator: `fixture:${port}`,
+    infrastructure: `fixture:${port}`,
   };
 }
 

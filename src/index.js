@@ -18,8 +18,8 @@
  *   - every call fails over transparently; subscriptions resurrect on the
  *     replacement server and deliver anything missed during the gap
  *   - money-relevant queries are quorum-verified by default: at least two
- *     matching endpoint responses and no plurality result; `verify: false`
- *     is an explicit single-server performance trade-off
+ *     matching eligible operator responses and no plurality result;
+ *     `verify: false` is an explicit single-server performance trade-off
  *   - when the whole pool is exhausted you get AllServersFailedError —
  *     loud death, never silent staleness
  *
@@ -54,13 +54,16 @@ export class Cascan extends EventEmitter {
   }
 
   /**
-   * Quorum-verified call: same method fanned out to independent servers.
+   * Quorum-verified call: same method fanned out to eligible operators.
    * @returns {Promise<{ value: any, receipt: object }>}
    *   receipt = { answered, agreement, servers[], disagreements[], degraded[] }
    */
   async verify(method, params = [], opts = {}) {
     const ranked = this.pool.ranked().filter(s => s.ports?.ssl || s.ports?.tcp);
-    const entries = ranked.slice(0, opts.maxServers ?? 4).map(toQuorumEntry);
+    // Pass the full ranked pool: queryQuorum filters to distinct trusted
+    // operators before applying maxFanout. Pre-slicing here could let fast
+    // gossip peers crowd all security voters out of the candidate window.
+    const entries = ranked.map(toQuorumEntry);
     const requestedMinimum = opts.minAgreement ?? 2;
     if (!Number.isInteger(requestedMinimum) || requestedMinimum < 1) {
       throw new RangeError('minAgreement must be a positive integer');
@@ -159,6 +162,8 @@ export class Cascan extends EventEmitter {
       host: s.host,
       ports: s.ports,
       source: s.source ?? 'curated',
+      operator: s.operator ?? null,
+      infrastructure: s.infrastructure ?? null,
       tlsStrict: s.tlsStrict !== false,
       software: s.software ?? null,
       protocol: s.protocol ?? null,

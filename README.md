@@ -44,13 +44,16 @@ failure history) is scored continuously; the pool is cached in
 `~/.cascan/servers.json` (24h TTL).
 
 Node `balance()`, `tx()`, and `height()` use strict quorum verification by
-default: they require at least two matching endpoint responses and reject a
-plurality/tie. Each returns a receipt showing who answered, agreed, or
-disagreed:
+default: they require matching responses from at least two eligible operator
+identities and reject a plurality/tie. Gossip servers improve availability
+but do not automatically become security voters. Duplicate operators,
+declared infrastructure groups, observed IP addresses, and exact TLS
+certificate fingerprints count once. Each call returns a receipt showing who
+answered, agreed, disagreed, or was excluded:
 
 ```js
 const bal = await bch.balance(addr);
-// bal.receipt = { answered, servers: [...], disagreements: [...], degraded: [...] }
+// bal.receipt = { answered, answeredOperator, operators: [...], servers: [...], ... }
 ```
 
 Use `verify: false` only for an explicit single-server latency trade-off;
@@ -235,7 +238,8 @@ them as BCH and attaches a warning to the envelope.
 
 Every `--json` line: `{ schema, ts, ok, data, error, meta }`.
 `meta.sources.fulcrum` carries the provenance: `answered`, `height`,
-per-server `statuses[]` (ok/failed/not-tried + latency), `disagreements[]`
+`answeredOperator`, agreeing `operators`, `voterCount`, per-server
+`statuses[]` (ok/failed/not-tried + latency and independence), `disagreements[]`
 (plurality record under `--quorum majority`), `degraded[]` (quorum
 requested but <2 servers answered). `meta.partial` flips true on any
 degradation — combine with `--strict` to fail automated checks.

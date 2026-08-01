@@ -125,6 +125,7 @@ test('transport: pool and quorum preserve the discovery-verified TCP endpoint', 
   assert.equal(quorum.transport, 'tcp');
   assert.equal(quorum.port, 50001);
   assert.deepEqual(quorum.ports, record.ports);
+  assert.equal(quorum.operator, undefined, 'an endpoint source label is not an operator identity');
   client.close();
   pool.close();
 });

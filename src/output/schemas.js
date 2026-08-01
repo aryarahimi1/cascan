@@ -49,7 +49,9 @@ export const ALL_SCHEMAS = Object.freeze(Object.values(SCHEMA));
  *
  * @typedef {{
  *   agreement: 'unanimous' | 'majority' | 'plurality' | 'single',
- *   servers: Array<{ server: string, value: any, agreed: boolean }>,
+ *   servers: Array<{ server: string, value: any, agreed: boolean,
+ *     operator?: string, infrastructure?: string, independent: boolean,
+ *     duplicateOf?: string }>,
  *   picked: { server: string, value: any },
  * }} FulcrumDisagreement
  */
@@ -73,10 +75,16 @@ export const ALL_SCHEMAS = Object.freeze(Object.values(SCHEMA));
  *     fulcrum?: {
  *       ok: boolean,
  *       answered?: string,
+ *       answeredOperator?: string,
  *       agreement?: 'unanimous'|'majority'|'plurality'|'single'|null,
  *       agreementCount?: number,
+ *       operators?: string[],
+ *       voterCount?: number,
  *       height?: number,
- *       servers?: Array<{ server: string, status: 'ok'|'failed'|'not-tried', latencyMs?: number, error?: string }>,
+ *       servers?: Array<{ server: string, status: 'ok'|'failed'|'not-tried',
+ *         latencyMs?: number, error?: string, reason?: string,
+ *         operator?: string, infrastructure?: string, independent?: boolean,
+ *         duplicateOf?: string }>,
  *       disagreements?: FulcrumDisagreement[],
  *       degraded?: FulcrumDegradation[],
  *     },
