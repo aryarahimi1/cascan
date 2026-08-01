@@ -1,9 +1,18 @@
 import { decodeCashAddr } from '../cashaddr.js';
 import { getNetwork } from '../networks.js';
 import { consensusHeight, scoreServer } from '../pool/health.js';
-import { BrowserFulcrumClient, BrowserFulcrumError } from './client.js';
+import { requireBchBlockHeaderHex } from '../validation.js';
+import {
+  BROWSER_CLIENT_LIMITS,
+  BrowserFulcrumClient,
+  BrowserFulcrumError,
+} from './client.js';
 import {
   BrowserServerPool,
+  MAX_BROWSER_CALLBACKS,
+  MAX_BROWSER_CALLBACKS_PER_SUBSCRIPTION,
+  MAX_BROWSER_EVENT_HANDLERS,
+  MAX_BROWSER_EVENT_HANDLERS_PER_EVENT,
   MAX_BROWSER_SERVERS,
   MAX_BROWSER_SUBSCRIPTIONS,
   MAX_REASONABLE_BCH_HEIGHT,
@@ -57,6 +66,15 @@ export class BrowserCascan {
       || tip.height > MAX_REASONABLE_BCH_HEIGHT
     ) {
       throw new BrowserFulcrumError('server returned an invalid BCH height', {
+        server: this.pool.current,
+        method: 'blockchain.headers.subscribe',
+        kind: 'application',
+      });
+    }
+    try {
+      requireBchBlockHeaderHex(tip.hex);
+    } catch {
+      throw new BrowserFulcrumError('server returned a malformed 80-byte block header', {
         server: this.pool.current,
         method: 'blockchain.headers.subscribe',
         kind: 'application',
@@ -150,6 +168,13 @@ export async function connect(opts = {}) {
     retryBudgetWindowMs: opts.retryBudgetWindowMs,
     recoveryBackoffBaseMs: opts.recoveryBackoffBaseMs,
     recoveryBackoffMaxMs: opts.recoveryBackoffMaxMs,
+    maxMessageBytes: opts.maxMessageBytes,
+    maxRecordsPerMessage: opts.maxRecordsPerMessage,
+    dispatchBatchSize: opts.dispatchBatchSize,
+    maxRecordsPerSecond: opts.maxRecordsPerSecond,
+    maxNotificationsPerSecond: opts.maxNotificationsPerSecond,
+    maxResponseRecords: opts.maxResponseRecords,
+    maxPendingRequests: opts.maxPendingRequests,
   });
   const cascan = new BrowserCascan(pool, { network: network.name });
   await pool.acquire();
@@ -234,9 +259,14 @@ function boundedMs(value, fallback, min, max, name) {
 }
 
 export {
+  BROWSER_CLIENT_LIMITS,
   BrowserFulcrumClient,
   BrowserFulcrumError,
   BrowserServerPool,
+  MAX_BROWSER_CALLBACKS,
+  MAX_BROWSER_CALLBACKS_PER_SUBSCRIPTION,
+  MAX_BROWSER_EVENT_HANDLERS,
+  MAX_BROWSER_EVENT_HANDLERS_PER_EVENT,
   MAX_BROWSER_SERVERS,
   MAX_BROWSER_SUBSCRIPTIONS,
   MAX_REASONABLE_BCH_HEIGHT,

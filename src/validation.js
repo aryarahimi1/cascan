@@ -18,6 +18,18 @@ export function requireBchHeight(value, message = 'server returned an invalid BC
   return value;
 }
 
+export function isValidBchBlockHeaderHex(value) {
+  return typeof value === 'string' && /^[0-9a-f]{160}$/i.test(value);
+}
+
+export function requireBchBlockHeaderHex(
+  value,
+  message = 'server returned a malformed 80-byte block header',
+) {
+  if (!isValidBchBlockHeaderHex(value)) throw new TypeError(message);
+  return value.toLowerCase();
+}
+
 /**
  * Parse a server-provided satoshi amount without accepting JavaScript's
  * permissive BigInt syntax (hex, whitespace, signs in confirmed balances).

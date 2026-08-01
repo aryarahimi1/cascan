@@ -24,7 +24,7 @@ async function installFulcrumMocks(page) {
           result = checkpointHeaders.get(request.params?.[0]);
           break;
         case 'blockchain.headers.subscribe':
-          result = { height: 900_000 };
+          result = { height: 900_000, hex: '00'.repeat(80) };
           break;
         case 'blockchain.address.subscribe':
           result = null;

@@ -1,4 +1,4 @@
-import { BrowserFulcrumClient } from './client.js';
+import { BrowserFulcrumClient, normalizeBrowserClientLimits } from './client.js';
 import { AllServersFailedError, isTransportFailure } from '../fulcrum/errors.js';
 import {
   isServerCoolingDown,
@@ -8,7 +8,11 @@ import {
   recordHeight,
   recordSuccess,
 } from '../pool/health.js';
-import { MAX_REASONABLE_BCH_HEIGHT, isValidBchHeight } from '../validation.js';
+import {
+  MAX_REASONABLE_BCH_HEIGHT,
+  requireBchBlockHeaderHex,
+  requireBchHeight,
+} from '../validation.js';
 import {
   SubscriptionDelivery,
   MAX_SUBSCRIPTION_TIMER_MS,
@@ -21,6 +25,10 @@ const SUBSCRIPTION_CHECK_MS = 30_000;
 const SUBSCRIPTION_CHECK_BATCH = 32;
 export const MAX_BROWSER_SERVERS = 32;
 export const MAX_BROWSER_SUBSCRIPTIONS = 1_000;
+export const MAX_BROWSER_CALLBACKS_PER_SUBSCRIPTION = 16;
+export const MAX_BROWSER_CALLBACKS = 2_000;
+export const MAX_BROWSER_EVENT_HANDLERS_PER_EVENT = 32;
+export const MAX_BROWSER_EVENT_HANDLERS = 128;
 export { MAX_REASONABLE_BCH_HEIGHT };
 
 export class BrowserServerPool {
@@ -33,9 +41,14 @@ export class BrowserServerPool {
     }
     this._now = typeof opts.now === 'function' ? opts.now : Date.now;
     this._random = typeof opts.random === 'function' ? opts.random : Math.random;
-    this._setTimeout = typeof opts.setTimeout === 'function' ? opts.setTimeout : setTimeout;
-    this._clearTimeout = typeof opts.clearTimeout === 'function' ? opts.clearTimeout : clearTimeout;
+    this._setTimeout = typeof opts.setTimeout === 'function'
+      ? opts.setTimeout
+      : (...args) => globalThis.setTimeout(...args);
+    this._clearTimeout = typeof opts.clearTimeout === 'function'
+      ? opts.clearTimeout
+      : handle => globalThis.clearTimeout(handle);
     this._recoveryPolicy = normalizeRecoveryOptions(opts, servers.length);
+    this._clientLimits = normalizeBrowserClientLimits(opts);
     const healthNow = this._now();
     this.servers = servers.map(server => ({
       ...server,
@@ -67,9 +80,18 @@ export class BrowserServerPool {
       timeoutMs: this.timeoutMs,
       WebSocket: opts.WebSocket,
       crypto: opts.crypto,
+      maxMessageBytes: this._clientLimits.messageBytes,
+      maxRecordsPerMessage: this._clientLimits.recordsPerMessage,
+      dispatchBatchSize: this._clientLimits.dispatchBatchSize,
+      maxRecordsPerSecond: this._clientLimits.recordsPerSecond,
+      maxNotificationsPerSecond: this._clientLimits.notificationsPerSecond,
+      maxResponseRecords: this._clientLimits.responseRecords,
+      maxPendingRequests: this._clientLimits.pendingRequests,
     }));
     this._events = new Map();
+    this._eventHandlerCount = 0;
     this._client = null;
+    this._candidateClient = null;
     this._current = null;
     this._connecting = null;
     this._failingOver = null;
@@ -80,6 +102,7 @@ export class BrowserServerPool {
     this._recoveryTimer = null;
     this._recoveryScheduledAt = 0;
     this._subscriptions = new Map();
+    this._callbackCount = 0;
     this._restoring = false;
     this._stagedStatuses = new Map();
     this._restoreError = null;
@@ -132,21 +155,31 @@ export class BrowserServerPool {
   on(event, fn) {
     if (typeof fn !== 'function') throw new TypeError('event handler must be a function');
     let handlers = this._events.get(event);
+    if (handlers?.has(fn)) return this;
+    if ((handlers?.size ?? 0) >= MAX_BROWSER_EVENT_HANDLERS_PER_EVENT) {
+      throw new RangeError(`browser event handler limit per event is ${MAX_BROWSER_EVENT_HANDLERS_PER_EVENT}`);
+    }
+    if (this._eventHandlerCount >= MAX_BROWSER_EVENT_HANDLERS) {
+      throw new RangeError(`browser total event handler limit is ${MAX_BROWSER_EVENT_HANDLERS}`);
+    }
     if (!handlers) {
       handlers = new Set();
       this._events.set(event, handlers);
     }
+    this._eventHandlerCount++;
     handlers.add(fn);
     return this;
   }
 
   off(event, fn) {
-    this._events.get(event)?.delete(fn);
+    const handlers = this._events.get(event);
+    if (handlers?.delete(fn)) this._eventHandlerCount--;
+    if (handlers?.size === 0) this._events.delete(event);
     return this;
   }
 
   emit(event, payload) {
-    for (const fn of this._events.get(event) ?? []) {
+    for (const fn of [...(this._events.get(event) ?? [])]) {
       try { fn(payload); } catch { /* user callback */ }
     }
   }
@@ -174,22 +207,24 @@ export class BrowserServerPool {
         break;
       }
       const client = this._clientFactory(server);
+      this._candidateClient = client;
       let activated = false;
       let closedDuringSetup = false;
       const startedAt = this._now();
       try {
         await client.connect();
         if (this._closed) throw new Error('pool closed');
-        client.onClose(() => {
+        client.onClose((error) => {
           if (!activated) {
             closedDuringSetup = true;
             return;
           }
           if (this._closed || this._client !== client) return;
-          this._failover('connection closed').catch(() => { /* exhausted event is emitted */ });
+          const reason = error?.message ? `connection closed: ${error.message}` : 'connection closed';
+          this._failover(reason).catch(() => { /* exhausted event is emitted */ });
         });
-        const tip = await client.request('blockchain.headers.subscribe');
-        this._recordSetupSuccess(server, this._now() - startedAt, validHeight(tip?.height));
+        const tip = requireHeaderTip(await client.request('blockchain.headers.subscribe'));
+        this._recordSetupSuccess(server, this._now() - startedAt, tip.height);
 
         this._client = client;
         this._current = server;
@@ -233,6 +268,8 @@ export class BrowserServerPool {
         client.close();
         if (closing) throw new Error('pool closed');
         this.emit('server-lost', { server: server.url, error: err?.message ?? String(err) });
+      } finally {
+        if (this._candidateClient === client) this._candidateClient = null;
       }
     }
 
@@ -314,6 +351,15 @@ export class BrowserServerPool {
     if (typeof callback !== 'function') throw new TypeError('subscription callback must be a function');
 
     let entry = this._subscriptions.get(address);
+    const alreadyRegistered = entry?.callbacks.has(callback) ?? false;
+    if (!alreadyRegistered && entry?.callbacks.size >= MAX_BROWSER_CALLBACKS_PER_SUBSCRIPTION) {
+      throw new RangeError(
+        `browser callback limit per subscription is ${MAX_BROWSER_CALLBACKS_PER_SUBSCRIPTION}`,
+      );
+    }
+    if (!alreadyRegistered && this._callbackCount >= MAX_BROWSER_CALLBACKS) {
+      throw new RangeError(`browser total subscription callback limit is ${MAX_BROWSER_CALLBACKS}`);
+    }
     if (!entry) {
       if (this._subscriptions.size >= MAX_BROWSER_SUBSCRIPTIONS) {
         throw new RangeError(`browser subscription limit is ${MAX_BROWSER_SUBSCRIPTIONS}`);
@@ -322,6 +368,7 @@ export class BrowserServerPool {
       this._subscriptions.set(address, entry);
     }
     entry.callbacks.add(callback);
+    if (!alreadyRegistered) this._callbackCount++;
     if (entry.initialized) return entry.observedStatus;
 
     if (!entry.initializing) {
@@ -345,7 +392,7 @@ export class BrowserServerPool {
     try {
       return await entry.initializing;
     } catch (err) {
-      entry.callbacks.delete(callback);
+      if (entry.callbacks.delete(callback)) this._callbackCount--;
       if (entry.callbacks.size === 0) {
         entry.callbacks.close();
         this._subscriptions.delete(address);
@@ -357,7 +404,7 @@ export class BrowserServerPool {
   unsubscribeAddress(address, callback) {
     const entry = this._subscriptions.get(address);
     if (!entry) return;
-    entry.callbacks.delete(callback);
+    if (entry.callbacks.delete(callback)) this._callbackCount--;
     if (entry.callbacks.size > 0) return;
     entry.callbacks.close();
     this._subscriptions.delete(address);
@@ -408,10 +455,21 @@ export class BrowserServerPool {
       }
       this._observeAddress(entry, status, 'notification');
     } else if (method === 'blockchain.headers.subscribe') {
-      const tip = Array.isArray(params) ? params[0] : params;
-      if (isValidBchHeight(tip?.height) && this._current) {
+      let tip;
+      try {
+        tip = requireHeaderTip(Array.isArray(params) ? params[0] : params);
+      } catch (err) {
+        if (this._restoring) {
+          this._restoreError = err;
+          this._client?.close();
+        } else {
+          this._failover('invalid header subscription notification').catch(() => {});
+        }
+        return;
+      }
+      if (this._current) {
         recordHeight(this._current.health, tip.height, this._now());
-        this.emit('block', { height: tip.height, hex: typeof tip.hex === 'string' ? tip.hex : null });
+        this.emit('block', tip);
       }
     }
   }
@@ -605,15 +663,25 @@ export class BrowserServerPool {
   close() {
     this._closed = true;
     this._cancelRecovery();
+    this._candidateClient?.close();
+    this._candidateClient = null;
     for (const entry of this._subscriptions.values()) entry.callbacks.close();
     this._subscriptions.clear();
+    this._callbackCount = 0;
     this._teardownClient();
     this._events.clear();
+    this._eventHandlerCount = 0;
   }
 }
 
-function validHeight(value) {
-  return isValidBchHeight(value) ? value : null;
+function requireHeaderTip(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('server returned an invalid BCH header subscription');
+  }
+  return {
+    height: requireBchHeight(value.height),
+    hex: requireBchBlockHeaderHex(value.hex),
+  };
 }
 
 function requireStatus(value) {

@@ -27,7 +27,9 @@ class FakePool {
   }
 
   async request(method) {
-    if (method === 'blockchain.headers.subscribe') return { height: 900_002 };
+    if (method === 'blockchain.headers.subscribe') {
+      return { height: 900_002, hex: '00'.repeat(80) };
+    }
     if (method === 'blockchain.address.get_balance') {
       return { confirmed: '2100000000000000', unconfirmed: -1 };
     }
@@ -127,7 +129,7 @@ test('browser API: rejects economically impossible balances and heights', async 
   const cascan = new BrowserCascan(pool);
 
   pool.request = async method => method === 'blockchain.headers.subscribe'
-    ? { height: 10_000_001 }
+    ? { height: 10_000_001, hex: '00'.repeat(80) }
     : { confirmed: '2100000000000001', unconfirmed: 0 };
   await assert.rejects(() => cascan.height(), /invalid BCH height/);
   await assert.rejects(() => cascan.balance(MAINNET), /impossible BCH balance/);

@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BrowserServerPool, MAX_BROWSER_SERVERS, MAX_REASONABLE_BCH_HEIGHT } from '../src/browser/pool.js';
+import {
+  BrowserServerPool,
+  MAX_BROWSER_CALLBACKS,
+  MAX_BROWSER_CALLBACKS_PER_SUBSCRIPTION,
+  MAX_BROWSER_EVENT_HANDLERS,
+  MAX_BROWSER_EVENT_HANDLERS_PER_EVENT,
+  MAX_BROWSER_SERVERS,
+  MAX_REASONABLE_BCH_HEIGHT,
+} from '../src/browser/pool.js';
 import { BrowserFulcrumError } from '../src/browser/client.js';
 import { AllServersFailedError } from '../src/fulcrum/errors.js';
 
@@ -10,9 +18,16 @@ class FakeBrowserClient {
     this.connected = false;
     this._notifications = new Set();
     this._closeHandlers = new Set();
+    this._rejectConnect = null;
+    this.closeCalls = 0;
   }
 
   async connect() {
+    if (this.spec.hangConnect) {
+      await new Promise((resolve, reject) => {
+        this._rejectConnect = reject;
+      });
+    }
     await this.spec.connectGate;
     if (this.spec.connectFails) throw transport('connect failed');
     this.connected = true;
@@ -21,7 +36,9 @@ class FakeBrowserClient {
 
   async request(method, params = []) {
     if (!this.connected) throw transport('not connected');
-    if (method === 'blockchain.headers.subscribe') return { height: this.spec.height ?? 100 };
+    if (method === 'blockchain.headers.subscribe') {
+      return { height: this.spec.height ?? 100, hex: this.spec.headerHex ?? '00'.repeat(80) };
+    }
     const result = this.spec.responses?.[method];
     if (result instanceof Error) throw result;
     if (typeof result === 'function') return result(params, this);
@@ -40,6 +57,9 @@ class FakeBrowserClient {
   }
 
   close() {
+    this.closeCalls++;
+    this._rejectConnect?.(transport('connect cancelled'));
+    this._rejectConnect = null;
     this.connected = false;
   }
 
@@ -174,6 +194,26 @@ test('browser pool: close wins a race with an in-flight connection', async () =>
   assert.equal(pool._recoveryTimer, null);
 });
 
+test('browser pool: close actively cancels a candidate that never connects', async () => {
+  const { pool, clients } = makePool([
+    { name: 'alpha', hangConnect: true },
+  ]);
+
+  const pending = pool.acquire();
+  await Promise.resolve();
+  pool.close();
+
+  await assert.rejects(
+    Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('candidate was not cancelled')), 50)),
+    ]),
+    /pool closed/,
+  );
+  assert.ok(clients.get('alpha').closeCalls >= 1);
+  assert.equal(pool._candidateClient, null);
+});
+
 test('browser pool: an open circuit is skipped without opening a WebSocket', async () => {
   const { pool, created } = makePool([
     { name: 'alpha' },
@@ -270,6 +310,44 @@ test('browser pool: invalid header notifications cannot fire block callbacks', a
   pool.close();
 });
 
+test('browser pool: malformed header hex is rejected during setup and live failover', async () => {
+  const { pool, clients } = makePool([
+    { name: 'alpha', headerHex: '00' },
+    { name: 'beta' },
+    { name: 'gamma' },
+  ]);
+  const blocks = [];
+  pool.on('block', block => blocks.push(block));
+
+  await pool.acquire();
+  assert.equal(pool.current, 'wss://beta.example/');
+  assert.equal(pool.servers[0].health.height, null);
+
+  clients.get('beta').notify('blockchain.headers.subscribe', [{
+    height: 101,
+    hex: 'not-an-80-byte-header',
+  }]);
+  await waitFor(() => pool.current === 'wss://gamma.example/');
+
+  assert.deepEqual(blocks, []);
+  pool.close();
+});
+
+test('browser pool: valid header events preserve height and normalize hex', async () => {
+  const { pool, clients } = makePool([{ name: 'alpha' }]);
+  const blocks = [];
+  pool.on('block', block => blocks.push(block));
+  await pool.acquire();
+
+  clients.get('alpha').notify('blockchain.headers.subscribe', [{
+    height: 101,
+    hex: 'AB'.repeat(80),
+  }]);
+
+  assert.deepEqual(blocks, [{ height: 101, hex: 'ab'.repeat(80) }]);
+  pool.close();
+});
+
 test('browser pool: bounds user-provided server lists', () => {
   assert.throws(
     () => new BrowserServerPool(
@@ -286,6 +364,26 @@ test('browser pool: liveness timers cannot overflow into a hot loop', () => {
     () => makePool([{ name: 'alpha' }], { subscriptionCheckMs: 2_147_483_648 }),
     /integer from 1 to 2147483647/,
   );
+});
+
+test('browser pool: event handlers are capped per event and across the pool', () => {
+  const { pool } = makePool([{ name: 'alpha' }]);
+  const duplicate = () => {};
+  pool.on('block', duplicate).on('block', duplicate);
+  for (let index = 1; index < MAX_BROWSER_EVENT_HANDLERS_PER_EVENT; index++) {
+    pool.on('block', () => {});
+  }
+  assert.throws(() => pool.on('block', () => {}), /per event/);
+
+  for (let group = 1; group < MAX_BROWSER_EVENT_HANDLERS / MAX_BROWSER_EVENT_HANDLERS_PER_EVENT; group++) {
+    for (let index = 0; index < MAX_BROWSER_EVENT_HANDLERS_PER_EVENT; index++) {
+      pool.on(`event-${group}`, () => {});
+    }
+  }
+  assert.equal(pool._eventHandlerCount, MAX_BROWSER_EVENT_HANDLERS);
+  assert.throws(() => pool.on('overflow', () => {}), /total event handler limit/);
+  assert.equal(pool._events.has('overflow'), false);
+  pool.close();
 });
 
 const STATUS_A = 'a'.repeat(64);
@@ -371,6 +469,46 @@ test('browser pool: a change during the initial subscribe handshake is not disca
 
   assert.equal(current, STATUS_B);
   assert.deepEqual(seen, [{ status: STATUS_B, source: 'notification' }]);
+  pool.close();
+});
+
+test('browser pool: subscription callbacks are capped without double-counting duplicates', async () => {
+  const { pool } = makePool([
+    { name: 'alpha', responses: { 'blockchain.address.subscribe': STATUS_A } },
+  ]);
+  const address = 'bitcoincash:qcallbacklimit';
+  const callbacks = Array.from(
+    { length: MAX_BROWSER_CALLBACKS_PER_SUBSCRIPTION },
+    () => () => {},
+  );
+  for (const callback of callbacks) await pool.subscribeAddress(address, callback);
+  await pool.subscribeAddress(address, callbacks[0]);
+
+  await assert.rejects(
+    () => pool.subscribeAddress(address, () => {}),
+    /callback limit per subscription/,
+  );
+  assert.equal(pool._callbackCount, MAX_BROWSER_CALLBACKS_PER_SUBSCRIPTION);
+  pool.close();
+});
+
+test('browser pool: total subscription callback state is capped', async () => {
+  const { pool } = makePool([
+    { name: 'alpha', responses: { 'blockchain.address.subscribe': STATUS_A } },
+  ]);
+  const subscriptions = MAX_BROWSER_CALLBACKS / MAX_BROWSER_CALLBACKS_PER_SUBSCRIPTION;
+  for (let addressIndex = 0; addressIndex < subscriptions; addressIndex++) {
+    const address = `bitcoincash:qcallbacktotal${addressIndex}`;
+    for (let index = 0; index < MAX_BROWSER_CALLBACKS_PER_SUBSCRIPTION; index++) {
+      await pool.subscribeAddress(address, () => {});
+    }
+  }
+
+  assert.equal(pool._callbackCount, MAX_BROWSER_CALLBACKS);
+  await assert.rejects(
+    () => pool.subscribeAddress('bitcoincash:qcallbackoverflow', () => {}),
+    /total subscription callback limit/,
+  );
   pool.close();
 });
 

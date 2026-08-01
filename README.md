@@ -127,9 +127,13 @@ discovery because browsers cannot use those APIs. Fulcrum peer gossip usually
 advertises raw TCP/TLS endpoints, not browser-compatible WSS endpoints. Browser
 quorum is not implemented yet, so a single-server balance remains that
 server's claim. Chain identity, failover, health, and subscription continuity
-are enforced. Direct Electrum connections reveal the user's IP address and
-queried BCH addresses to each selected server; cascan never handles private
-keys.
+are enforced. Hostile WSS traffic is bounded: 2 MiB messages, 256 JSON records
+per message and per second, 128 notifications per second, 16 records per event
+loop turn, 10,000 records per result array, and 64 in-flight requests by
+default. Queue or validation violations close that server and trigger pool
+failover; block notifications require an exact 80-byte header. Direct Electrum
+connections reveal the user's IP address and queried BCH addresses to each
+selected server; cascan never handles private keys.
 
 ### CashScript in one line
 

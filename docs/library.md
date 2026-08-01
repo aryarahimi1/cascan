@@ -99,7 +99,10 @@ assertions—not proof against hidden common ownership or collusion.
 subscriptionCheckBatchSize?, handlerRetryBaseMs?, handlerRetryMaxMs?,
 handlerTimeoutMs?, failureBackoffBaseMs?, failureBackoffMaxMs?,
 minHealthyUptimeMs?, retryBudgetAttempts?, retryBudgetWindowMs?,
-recoveryBackoffBaseMs?, recoveryBackoffMaxMs? })` automatically uses
+recoveryBackoffBaseMs?, recoveryBackoffMaxMs?, maxMessageBytes?,
+maxRecordsPerMessage?, dispatchBatchSize?, maxRecordsPerSecond?,
+maxNotificationsPerSecond?, maxResponseRecords?, maxPendingRequests? })`
+automatically uses
 the selected network's built-in `wss://` bootstrap pool. It verifies each
 candidate against BCH fork checkpoints using Web Crypto, then connects to the
 best healthy endpoint. Passing `servers` overrides the bootstrap pool.
@@ -125,9 +128,33 @@ The returned `BrowserCascan` provides:
 | `on` / `off` | pool lifecycle, recovery, `block`, and `handler-error` events listed above |
 | `close()` | closes the pool and clears subscriptions |
 
-Browser security defaults: `wss://` only, certificate validation delegated to
-the browser, maximum 32 servers and 1,000 subscriptions, bounded messages and
-configuration, BCH checkpoint verification, and atomic subscription restore.
+Browser resource limits:
+
+| option / bound | default | allowed range or hard cap |
+|---|---:|---:|
+| `maxMessageBytes` | 2 MiB | 350,000 bytes–8 MiB |
+| `maxRecordsPerMessage` | 256 | 1–256 |
+| queued server records | 512 | derived; at most 2× the per-message record cap |
+| `dispatchBatchSize` | 16 | 1–16 records per event-loop turn |
+| `maxRecordsPerSecond` | 256 | 1–1,024 |
+| `maxNotificationsPerSecond` | 128 | 1–512 |
+| `maxResponseRecords` | 10,000 | 1–50,000 array items |
+| `maxPendingRequests` | 64 | 1–128 |
+| raw-client notification / close handlers | 8 each | hard cap |
+| pool callbacks | 16 per subscription, 2,000 total | hard cap |
+| pool event handlers | 32 per event, 128 total | hard cap |
+
+The client rejects binary, empty, malformed, over-batched, over-rate, or
+over-queue server traffic and closes that endpoint. Dispatch is split across
+event-loop turns so a legal batch cannot monopolize the browser main thread.
+Header subscription data must contain a valid BCH height and exactly 80 bytes
+of hexadecimal block-header data. `close()` also cancels a WebSocket setup that
+has not finished. Raise a configurable limit only for a known workload, such
+as an unusually large history response; the hard caps cannot be disabled.
+
+Other browser security defaults are `wss://` only, certificate validation
+delegated to the browser, maximum 32 servers and 1,000 subscriptions, BCH
+checkpoint verification, and atomic subscription restore.
 The browser build does **not** claim that one server's balance, height, or
 block event is independently verified; use Node quorum when that property is
 required. Every selected Electrum operator can observe the user's IP address and queried BCH addresses,

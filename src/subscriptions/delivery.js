@@ -89,6 +89,10 @@ export class SubscriptionDelivery {
     return this._handlers.size;
   }
 
+  has(handler) {
+    return this._handlers.has(handler);
+  }
+
   add(handler) {
     if (typeof handler !== 'function') throw new TypeError('subscription callback must be a function');
     if (this._closed) throw new Error('subscription delivery closed');
@@ -96,7 +100,7 @@ export class SubscriptionDelivery {
   }
 
   delete(handler) {
-    this._handlers.delete(handler);
+    const deleted = this._handlers.delete(handler);
     const state = this._active?.targets.get(handler);
     if (state) {
       state.cancelled = true;
@@ -104,6 +108,7 @@ export class SubscriptionDelivery {
       this._active.targets.delete(handler);
       this._maybeComplete(this._active);
     }
+    return deleted;
   }
 
   /** Establish the initial server state without firing a change callback. */

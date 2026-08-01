@@ -138,6 +138,15 @@ backpressure, and periodic state re-query behavior as Node. It still observes
 one active server at a time, so delivery reliability does not turn the
 server's claim into independent verification.
 
+Treat every WSS server as a potentially hostile network peer. The browser
+client caps message bytes, JSON records, queued work, record and notification
+rates, result-array length, pending requests, and registered callbacks. It
+dispatches at most 16 records per event-loop turn, validates block headers as
+exactly 80 bytes of hexadecimal data, and immediately cancels an unfinished
+connection when closed. A violation closes the endpoint and lets the pool fail
+over; it does not make malicious data truthful. Configurable limits and their
+hard ceilings are listed in [the browser API reference](library.md#browser-api).
+
 ## Residual trust limits
 
 - Checkpoints prove a server follows BCH history at the pinned fork heights;
@@ -163,6 +172,10 @@ server's claim into independent verification.
   intentionally trade temporary availability for process and network safety.
   A pool with too few healthy endpoints may remain unavailable until a
   cooldown or budget window opens.
+- Browser resource bounds reduce denial-of-service impact but cannot provide
+  WebSocket backpressure or stop a server from repeatedly forcing bounded
+  disconnects. Repeated resource-limit failovers should be monitored as a
+  hostile-server or capacity signal.
 
 ## Integration checklist
 
