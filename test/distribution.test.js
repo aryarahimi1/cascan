@@ -27,8 +27,8 @@ test('public tree excludes disabled installers and internal working material', (
 test('README advertises only the exact verified scoped beta install path', () => {
   const readme = read('../README.md');
   assert.doesNotMatch(readme, /npm install -g cascan/);
-  assert.match(readme, /npm install @aryarh\/cascan@0\.4\.0-beta\.1/);
-  assert.match(readme, /npx --package=@aryarh\/cascan@0\.4\.0-beta\.1 cascan --help/);
+  assert.match(readme, /npm install @aryarh\/cascan@0\.4\.0-beta\.2/);
+  assert.match(readme, /npx --package=@aryarh\/cascan@0\.4\.0-beta\.2 cascan --help/);
   assert.doesNotMatch(readme, /npm install @aryarh\/cascan(?:\s|`|$)/m);
   assert.match(readme, /unscoped `cascan` package is \*\*not\*\* this project/i);
   assert.doesNotMatch(readme, /raw\.githubusercontent\.com.*install\.sh/);

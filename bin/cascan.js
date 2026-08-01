@@ -23,7 +23,7 @@ import { SCHEMA } from '../src/output/schemas.js';
 import { dispatchCommand } from '../src/cli/run.js';
 import { cmdInteractive } from '../src/commands/interactive.js';
 
-const VERSION = '0.4.0-beta.1';
+const VERSION = '0.4.0-beta.2';
 
 const HELP = `
   cascan — verify, don't trust: Bitcoin Cash in your terminal
