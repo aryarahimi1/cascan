@@ -30,6 +30,19 @@ npm records SLSA provenance for the GitHub Actions build, and a clean `@next`
 install verified the Node export, browser export, CLI version, and zero known
 production dependency vulnerabilities.
 
+## Limited developer beta record
+
+`@aryarh/cascan@0.4.0-beta.3` was staged by the trusted GitHub publisher from
+annotated tag `v0.4.0-beta.3` at commit
+`dce26fe7851b362b1c35976d082f642e07b06e44`, downloaded from npm's staging
+queue, and compared byte-for-byte after extraction with the locally reviewed
+package before maintainer approval. Its registry SHA-1 is
+`b4803c229cbb8c2be87989d21992012ce47409b3`; its SHA-512 integrity is
+`sha512-/q9FVASLeUvp2N42YIyzsecp+DKJY/B8QrXWPHqWoBB5kENZT6DPfvD2tPdF3tdXrThOkb5A9QLW6GKW9JgXjQ==`.
+npm records SLSA provenance and a registry signature. A clean exact-version
+install verified the Node export, browser export, CLI version, 76-file package
+manifest, and zero known production dependency vulnerabilities.
+
 ## One-time owner setup
 
 1. Create or recover the maintainer's npm account and enable account-level 2FA.
