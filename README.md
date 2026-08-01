@@ -206,10 +206,23 @@ cascan schema
 
 ## Install
 
-No official npm release has been published yet. Until this README links to a
-specific registry version, packages claiming to be cascan are not official.
+The reviewed public beta is [`@aryarh/cascan@0.4.0-beta.1`](https://www.npmjs.com/package/@aryarh/cascan/v/0.4.0-beta.1).
+Pin the exact prerelease during pilots:
 
-To evaluate a reviewed checkout during development:
+```sh
+npm install @aryarh/cascan@0.4.0-beta.1
+```
+
+For the CLI without a global install:
+
+```sh
+npx --package=@aryarh/cascan@0.4.0-beta.1 cascan --help
+```
+
+The unscoped `cascan` package is **not** this project. This remains a beta: do
+not treat a plain, unpinned install as a production-stability promise.
+
+To evaluate a reviewed checkout directly:
 
 ```sh
 npm test
@@ -217,7 +230,7 @@ node bin/cascan.js --help
 ```
 
 See [the release-security checklist](docs/release-security.md) for the controls
-that must be completed before public installation is advertised.
+used for public releases.
 
 ## Why
 

@@ -1,8 +1,22 @@
 # Release-security checklist
 
-Public installation remains disabled until every item in this checklist is
-complete. Preparing the workflow does not claim the npm name and does not make
-the library production-ready by itself.
+This checklist records the controls required for every public package release.
+Publishing a package does not make the library production-ready by itself.
+
+## Bootstrap record
+
+`@aryarh/cascan@0.4.0-beta.1` was published from annotated tag
+`v0.4.0-beta.1` at commit `07a653cd45eae24a4fe4e9cb7fda96bf182dcebd`.
+Its registry SHA-1 is `799b125e9d9b8fa75051ee6d05d8b65f9f9a6a3d`; the
+SHA-512 integrity is
+`sha512-4wLILc0BBwtqQ8CLlbZ2rnNZ8G3Z69zw9NA1V6uI2VEd0luP5sL0lTyyzAAqofGfE3+ej6HwpRBa2IsoM9BkgA==`.
+The scoped package is public, package publishing requires 2FA and disallows
+reusable tokens, and its trusted GitHub publisher can only create a staged
+package through the protected `npm-production` environment.
+
+npm assigned `latest` to the only published version and rejects removing that
+required tag. Public beta instructions therefore pin the exact prerelease;
+`latest` is not a claim of production stability.
 
 ## One-time owner setup
 
