@@ -76,14 +76,16 @@ failure does not leave an inaccessible background task.
 `watch()` callbacks may be synchronous or async. A throw, rejected promise,
 or 30-second timeout emits `handler-error` and retries with bounded backoff
 and the same event ID. This is in-process **at-least-once** delivery, so make
-handlers idempotent using `event.id`; a timed-out handler may finish after its
-retry starts. While a handler is blocked, cascan retains the active event and
-only the newest not-yet-started status, because Electrum statuses are refresh
-signals rather than a transaction ledger. The pool also re-queries subscribed
-state in round-robin batches (every 30 seconds by default), so a working ping
-cannot hide a silent notification channel. There is no durable queue across a
-process/page crash: always re-query verified state after startup and on every
-callback.
+handlers idempotent using `event.id` during one run and a durable
+transaction/outpoint/action key across restarts; a timed-out handler may finish
+after its retry starts. Return the side-effect promise—fire-and-forget is
+acknowledged too early. While a handler is blocked, cascan retains the active
+event and only the newest not-yet-started status, because Electrum statuses are
+refresh signals rather than a transaction ledger. The pool also re-queries
+subscribed state in round-robin batches (every 30 seconds by default), so a
+working ping cannot hide a silent notification channel. There is no durable
+queue across a process/page crash: always re-query verified state after startup
+and on every callback.
 
 Full API reference: **[docs/library.md](docs/library.md)**. Networks:
 `mainnet` (default), `chipnet` — where CashScript contract development
@@ -320,7 +322,9 @@ not a public issue.
   validated before they reach a URL path, metadata fetches refuse redirects.
 - **Payment automation:** watch, campaign, and alert webhook decisions require
   at least two matching Fulcrum responses; subscription notifications are
-  treated only as untrusted change signals.
+  treated only as untrusted change signals. Watch/campaign webhook state is
+  committed only after 2xx, and watch/campaign/alert requests include a durable
+  `Idempotency-Key` for receiver-side atomic deduplication.
 - **Signing and broadcast:** adapter UTXOs are checked against quorum-agreed
   raw funding outputs (including CashToken prefixes), and broadcast success
   requires independent retrieval of the exact raw transaction. Adapter

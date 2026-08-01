@@ -117,3 +117,23 @@ test('webhook: hostname resolving to loopback blocked at lookup (DNS rebinding)'
     assert.match(err.message, /resolves to blocked address/);
   }
 });
+
+test('webhook: idempotency keys reject header injection before dialing', async () => {
+  const { postWebhook } = await import('../src/commands/webhook.js');
+  await assert.rejects(
+    () => postWebhook('https://example.com/hook', { probe: true }, {
+      idempotencyKey: 'payment\r\nx-forged: yes',
+    }),
+    /idempotency key must be 1-200 safe ASCII/,
+  );
+});
+
+test('webhook: durable business keys are stable, distinct, and header-safe', async () => {
+  const { durableWebhookKey } = await import('../src/commands/idempotency.js');
+  const first = durableWebhookKey('watch.payment', '11'.repeat(32), 0);
+  assert.equal(first, durableWebhookKey('watch.payment', '11'.repeat(32), 0));
+  assert.notEqual(first, durableWebhookKey('watch.confirmed', '11'.repeat(32), 1));
+  assert.notEqual(first, durableWebhookKey('watch.payment', '22'.repeat(32), 0));
+  assert.match(first, /^cascan\.watch\.payment:[0-9a-f]{64}$/);
+  assert.ok(first.length <= 200);
+});

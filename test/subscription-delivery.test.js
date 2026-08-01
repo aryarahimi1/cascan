@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SubscriptionDelivery } from '../src/subscriptions/delivery.js';
+import { createCoalescedTask } from '../src/subscriptions/coalesced-task.js';
 
 const waitFor = async (predicate, timeoutMs = 500) => {
   const deadline = Date.now() + timeoutMs;
@@ -54,6 +55,103 @@ test('delivery: rejected promises retry with one stable event id until acknowled
   assert.equal(errors[0].willRetry, true);
   assert.equal(queue.deliveredValue, 'b');
   queue.close();
+});
+
+test('delivery: database commit followed by lost acknowledgement does not duplicate a durable effect', async () => {
+  const rows = new Map();
+  let credited = 0;
+  let attempts = 0;
+  const queue = new SubscriptionDelivery({
+    type: 'address-status',
+    key: 'bitcoincash:qptest',
+    sessionId: 'database-session',
+    retryBaseMs: 2,
+    retryMaxMs: 2,
+    handlerTimeoutMs: 100,
+  });
+  queue.setBaseline('a');
+  queue.add(async (_value, event) => {
+    attempts++;
+    // Model INSERT ... ON CONFLICT (idempotency_key) DO NOTHING.
+    if (!rows.has(event.id)) {
+      rows.set(event.id, { status: 'credited' });
+      credited++;
+    }
+    if (attempts === 1) throw new Error('database committed but acknowledgement was lost');
+  });
+
+  const eventId = queue.observe('b');
+  await waitFor(() => queue.deliveredValue === 'b');
+  assert.equal(attempts, 2);
+  assert.equal(rows.size, 1);
+  assert.equal(rows.has(eventId), true);
+  assert.equal(credited, 1);
+  queue.close();
+});
+
+test('delivery: timeout overlap remains one durable effect with a unique idempotency key', async () => {
+  const rows = new Set();
+  let effects = 0;
+  const queue = new SubscriptionDelivery({
+    type: 'address-status',
+    key: 'bitcoincash:qptest',
+    sessionId: 'overlap-session',
+    retryBaseMs: 2,
+    retryMaxMs: 2,
+    handlerTimeoutMs: 5,
+  });
+  queue.setBaseline('a');
+  queue.add(async (_value, event) => {
+    if (event.attempt === 1) await new Promise(resolve => setTimeout(resolve, 20));
+    if (!rows.has(event.id)) {
+      rows.add(event.id);
+      effects++;
+    }
+  });
+
+  queue.observe('b');
+  await waitFor(() => queue.deliveredValue === 'b');
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(rows.size, 1);
+  assert.equal(effects, 1);
+  queue.close();
+});
+
+test('coalesced callback retries join the active failure instead of falsely acknowledging', async () => {
+  let rejectActive;
+  let runs = 0;
+  const activeFailure = new Promise((_, reject) => { rejectActive = reject; });
+  const run = createCoalescedTask(async () => {
+    runs++;
+    await activeFailure;
+  });
+
+  const first = run();
+  const retry = run();
+  assert.equal(first, retry);
+  rejectActive(new Error('database write failed'));
+  await assert.rejects(first, /database write failed/);
+  await assert.rejects(retry, /database write failed/);
+  assert.equal(runs, 1);
+});
+
+test('coalesced callback runs one bounded follow-up for concurrent change signals', async () => {
+  let release;
+  let runs = 0;
+  const firstRun = new Promise(resolve => { release = resolve; });
+  const run = createCoalescedTask(async () => {
+    runs++;
+    if (runs === 1) await firstRun;
+  });
+
+  const first = run();
+  const second = run();
+  const third = run();
+  assert.equal(first, second);
+  assert.equal(first, third);
+  release();
+  await first;
+  assert.equal(runs, 2, 'many concurrent signals coalesce to one follow-up pass');
 });
 
 test('delivery: stuck handlers time out visibly and remain retryable', async () => {

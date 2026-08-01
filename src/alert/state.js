@@ -12,9 +12,10 @@
  * single-slot in-process mutex).
  */
 
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 
 const ALERTS_PATH = join(homedir(), '.cascan', 'alerts.json');
 
@@ -26,28 +27,33 @@ function withWriteLock(fn) {
   return next;
 }
 
-/** Read raw alerts file; returns {} on any error. */
+/** Read raw alerts file; a missing file is empty, corruption/I/O fail closed. */
 async function readRaw() {
   try {
     const text = await readFile(ALERTS_PATH, 'utf8');
     const parsed = JSON.parse(text);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('alert state file must contain a JSON object');
+    }
+    return parsed;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return {};
+    throw new Error(`alert state unavailable: ${error?.message ?? error}`, { cause: error });
   }
 }
 
-/** Write object to alerts file atomically. Never throws. */
+/** Write object to alerts file atomically. Persistence failures are visible. */
 async function writeRaw(data) {
+  await mkdir(dirname(ALERTS_PATH), { recursive: true, mode: 0o700 });
+  // Use an unpredictable, exclusive temp file so another local process cannot
+  // pre-place a symlink at a predictable PID-based path.
+  const tmp = `${ALERTS_PATH}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    await mkdir(dirname(ALERTS_PATH), { recursive: true });
-    // Stage to a per-pid tmp then rename so concurrent `cascan alert` runs
-    // across terminals don't corrupt the JSON file.
-    const tmp = `${ALERTS_PATH}.${process.pid}.tmp`;
-    await writeFile(tmp, JSON.stringify(data, null, 2));
+    await writeFile(tmp, JSON.stringify(data, null, 2), { mode: 0o600, flag: 'wx' });
     await rename(tmp, ALERTS_PATH);
-  } catch {
-    // Non-fatal — alerting still works, dedupe degrades to per-process.
+  } catch (error) {
+    await unlink(tmp).catch(() => {});
+    throw error;
   }
 }
 

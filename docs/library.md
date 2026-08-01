@@ -72,12 +72,22 @@ the callback acknowledges that attempt. A throw, rejected promise, or timeout
 emits `handler-error` and retries with the same `id`; `attempt` increases.
 This provides at-least-once delivery while the process/page remains alive.
 
-Handlers must be idempotent on `event.id`. JavaScript cannot cancel a timed-out
-handler, so the original attempt and a retry can overlap. Callback retries and
-event IDs are in memory only; a restart has no durable replay log. Under
-backpressure, cascan retains the active event and coalesces later unstarted
-observations to the newest state. Therefore callbacks are triggers to re-query
-current state, not a complete event ledger or payment proof.
+Handlers must be idempotent. `event.id` is stable across attempts in the
+current process/page, but it changes after restart; use a transaction/outpoint/
+action key protected by a database unique constraint for durable financial
+effects. JavaScript cannot cancel a timed-out handler, so the original attempt
+and a retry can overlap. Return the database/webhook promise—fire-and-forget is
+acknowledged too early. Callback retries and event IDs are in memory only; a
+restart has no durable replay log. Under backpressure, cascan retains the
+active event and coalesces later unstarted observations to the newest state.
+Therefore callbacks are triggers to re-query current state, not a complete
+event ledger or payment proof.
+
+CLI watch/campaign/alert webhooks carry an `Idempotency-Key` header;
+watch/campaign do not commit their local processed state until a 2xx response.
+Receivers must persist that key atomically with the side effect because network
+timeouts are ambiguous, and should return 2xx when a key was already committed.
+The header is not a signature; authenticate the webhook endpoint separately.
 
 Every 30 seconds by default, the pool re-issues subscribe calls for a bounded,
 round-robin batch. A changed response enters the same delivery path with

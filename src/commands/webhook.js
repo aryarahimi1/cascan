@@ -125,8 +125,9 @@ function guardedLookup(hostname, options, callback) {
 }
 
 /**
- * POST a JSON envelope to the webhook. Fire-and-forget semantics: throws on
- * transport failure so the caller can log, but never retries. Uses
+ * POST one JSON-envelope attempt to the webhook. Throws on transport or HTTP
+ * failure; higher-level acknowledged delivery may retry with the same
+ * idempotency key. Uses
  * node:http(s).request instead of fetch so DNS resolution goes through
  * guardedLookup (fetch/undici does not expose a lookup hook per-request).
  * Redirects are NOT followed — a 3xx response is a failure, matching the
@@ -134,11 +135,20 @@ function guardedLookup(hostname, options, callback) {
  *
  * @param {string} urlStr - pre-validated
  * @param {object} payload
+ * @param {{ idempotencyKey?: string }} [opts]
  */
-export async function postWebhook(urlStr, payload) {
+export async function postWebhook(urlStr, payload, opts = {}) {
   const url = validateWebhookUrl(urlStr);
   const body = JSON.stringify(payload);
   const request = url.protocol === 'https:' ? httpsRequest : httpRequest;
+  const idempotencyKey = opts.idempotencyKey;
+  if (idempotencyKey != null && (
+    typeof idempotencyKey !== 'string' ||
+    idempotencyKey.length < 1 || idempotencyKey.length > 200 ||
+    !/^[a-z0-9._:-]+$/i.test(idempotencyKey)
+  )) {
+    throw new TypeError('webhook idempotency key must be 1-200 safe ASCII characters');
+  }
 
   return new Promise((resolve, reject) => {
     const req = request({
@@ -149,6 +159,7 @@ export async function postWebhook(urlStr, payload) {
       headers: {
         'content-type': 'application/json',
         'content-length': Buffer.byteLength(body),
+        ...(idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}),
       },
       lookup: guardedLookup,
       timeout: 10_000,

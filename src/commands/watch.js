@@ -36,6 +36,8 @@ import { emitNDJSON } from '../output/emit.js';
 import { renderPaymentEvent, shortenCashaddr, sanitize } from '../cli/render.js';
 import { gray, cyan } from '../cli/theme.js';
 import { postWebhook } from './webhook.js';
+import { durableWebhookKey } from './idempotency.js';
+import { createCoalescedTask } from '../subscriptions/coalesced-task.js';
 
 export async function cmdWatch(parsed) {
   const rec = parseAddress(parsed.target, { network: parsed.network });
@@ -61,26 +63,26 @@ export async function cmdWatch(parsed) {
     warnings: [...rec.warnings],
   });
 
-  const emit = (event, data) => {
-    const env = wrapEvent(SCHEMA.WATCH, event, { data, meta: watchMeta() });
+  const outputEnvelope = (env) => {
     if (parsed.json) {
       emitNDJSON(env);
-    } else if (event === 'payment' || event === 'confirmed') {
-      process.stdout.write(renderPaymentEvent({ ...data, confirmed: event === 'confirmed' ? true : data.confirmed }) + '\n');
+    } else if (env.event === 'payment' || env.event === 'confirmed') {
+      process.stdout.write(renderPaymentEvent({
+        ...env.data,
+        confirmed: env.event === 'confirmed' ? true : env.data.confirmed,
+      }) + '\n');
     }
     return env;
   };
+  const envelope = (event, data) => wrapEvent(SCHEMA.WATCH, event, { data, meta: watchMeta() });
+  const emit = (event, data) => outputEnvelope(envelope(event, data));
 
-  const fireWebhook = async (env) => {
+  const fireWebhook = async (env, idempotencyKey) => {
     if (!parsed.webhook) return;
     const d = env.data;
     if (env.event === 'payment' && d?.confirmed === false && !parsed.zeroConf) return; // 0-conf is opt-in
     if (env.event !== 'payment' && env.event !== 'confirmed') return;
-    try {
-      await postWebhook(parsed.webhook, env);
-    } catch (err) {
-      process.stderr.write(`! webhook failed: ${err.message}\n`);
-    }
+    await postWebhook(parsed.webhook, env, { idempotencyKey });
   };
 
   const fetchHistory = async () =>
@@ -153,32 +155,33 @@ export async function cmdWatch(parsed) {
     }
 
     // Subscription-driven change loop (reentrancy-guarded)
-    let busy = false, dirty = false;
-    const onChange = async () => {
-      if (busy) { dirty = true; return; }
-      busy = true;
-      try {
-        const hist = await fetchHistory();
-        for (const h of hist) {
-          if (!seen.has(h.tx_hash)) {
+    const reconcile = async () => {
+      const hist = await fetchHistory();
+      for (const h of hist) {
+        if (!seen.has(h.tx_hash)) {
+          const ev = await buildPaymentEvent(h.tx_hash, h.height);
+          if (!ev) {
             seen.set(h.tx_hash, h.height);
-            const ev = await buildPaymentEvent(h.tx_hash, h.height);
-            if (!ev) continue;
-            const env = emit('payment', ev);
-            await fireWebhook(env);
-          } else if (seen.get(h.tx_hash) === 0 && h.height > 0) {
-            seen.set(h.tx_hash, h.height);
-            const ev = await buildPaymentEvent(h.tx_hash, h.height);
-            if (!ev) continue;
-            const env = emit('confirmed', ev);
-            await fireWebhook(env);
+            continue;
           }
+          const env = envelope('payment', ev);
+          await fireWebhook(env, durableWebhookKey('watch.payment', h.tx_hash, h.height));
+          outputEnvelope(env);
+          seen.set(h.tx_hash, h.height);
+        } else if (seen.get(h.tx_hash) === 0 && h.height > 0) {
+          const ev = await buildPaymentEvent(h.tx_hash, h.height);
+          if (!ev) {
+            seen.set(h.tx_hash, h.height);
+            continue;
+          }
+          const env = envelope('confirmed', ev);
+          await fireWebhook(env, durableWebhookKey('watch.confirmed', h.tx_hash, h.height));
+          outputEnvelope(env);
+          seen.set(h.tx_hash, h.height);
         }
-      } finally {
-        busy = false;
-        if (dirty) { dirty = false; await onChange(); }
       }
     };
+    const onChange = createCoalescedTask(reconcile);
 
     // Subscription errors must not be silent — a swallowed exception once
     // hid a renderer bug that dropped 0-conf payments (security review).

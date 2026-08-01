@@ -14,7 +14,7 @@
  *   error     — non-fatal iteration failure (loop continues)
  *   stop      — Ctrl+C teardown
  *
- * Outcomes: fired | deduped | not-fired | fire-failed | dry-run
+ * Outcomes: fired | fired-state-failed | deduped | not-fired | fire-failed | dry-run
  *
  * Lineage: ported from glnc's src/alert/index.js, re-plumbed onto the
  * Fulcrum quorum layer (glnc polls one RPC; cascan keeps its quorum posture).
@@ -32,6 +32,7 @@ import { wrapEvent } from '../output/envelope.js';
 import { emitNDJSON } from '../output/emit.js';
 import { shortenCashaddr } from '../cli/render.js';
 import { gray, red, green, bold, cyan } from '../cli/theme.js';
+import { durableWebhookKey } from './idempotency.js';
 
 class AlertUsageError extends Error {
   constructor(message) { super(message); this.exitCode = 1; }
@@ -96,6 +97,7 @@ async function runIteration(rec, parsedCondition, parsed, pollIndex) {
   let outcome = 'not-fired';
   let httpStatus = null;
   let webhookError = null;
+  let stateError = null;
   let humanOutcome = gray('not-fired');
 
   if (evalResult.ok && prevState?.lastConditionResult === true) {
@@ -103,16 +105,33 @@ async function runIteration(rec, parsedCondition, parsed, pollIndex) {
     humanOutcome = gray('skipped (already fired; re-arms when condition goes false)');
   } else if (shouldFire) {
     const payload = wrapEvent(SCHEMA.ALERT, 'fired', { data: { ...baseData, evaluatedAt: ts }, meta });
+    let posted = false;
     try {
-      await postWebhook(parsed.webhook, payload);
+      // Reuse the same key until this true edge is persisted. The previous
+      // successful fire timestamp changes only after a false re-arm, so a
+      // later legitimate edge receives a new key.
+      const idempotencyKey = durableWebhookKey(
+        'alert.fire',
+        alertKey,
+        prevState?.lastFiredAt ?? 0,
+      );
+      await postWebhook(parsed.webhook, payload, { idempotencyKey });
+      posted = true;
       await writeAlertState(alertKey, { lastFiredAt: Date.now(), lastConditionResult: true });
       outcome = 'fired';
       httpStatus = 200; // postWebhook throws on any !ok status
       humanOutcome = green('fired');
     } catch (err) {
-      outcome = 'fire-failed';
-      webhookError = err.message;
-      humanOutcome = red(`fire-failed: ${err.message}`);
+      if (posted) {
+        outcome = 'fired-state-failed';
+        httpStatus = 200;
+        stateError = err.message;
+        humanOutcome = red(`fired, but dedupe state failed: ${err.message}`);
+      } else {
+        outcome = 'fire-failed';
+        webhookError = err.message;
+        humanOutcome = red(`fire-failed: ${err.message}`);
+      }
     }
   } else if (!evalResult.ok) {
     // Condition false — re-arm.
@@ -124,7 +143,15 @@ async function runIteration(rec, parsedCondition, parsed, pollIndex) {
 
   return {
     env: wrapEvent(SCHEMA.ALERT, 'evaluated', {
-      data: { ...baseData, dryRun: false, outcome, httpStatus, webhookError, fired: outcome === 'fired' },
+      data: {
+        ...baseData,
+        dryRun: false,
+        outcome,
+        httpStatus,
+        webhookError,
+        stateError,
+        fired: outcome === 'fired' || outcome === 'fired-state-failed',
+      },
       meta,
     }),
     humanOutcome,

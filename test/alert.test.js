@@ -7,7 +7,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, stat, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { parseCondition, buildContext, evaluateCondition } from '../src/alert/conditions.js';
+
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // parseCondition
@@ -97,4 +104,39 @@ test('evaluate: unconfirmed paths see only the mempool delta', () => {
   const ctx = buildContext({ confirmed: 500_000_000, unconfirmed: 25_000_000 }, null);
   assert.equal(evaluateCondition(parseCondition('unconfirmed > 0.2'), ctx).ok, true);
   assert.equal(evaluateCondition(parseCondition('unconfirmed.sats == 25000000'), ctx).ok, true);
+});
+
+test('alert state: writes privately and fails closed on corrupted persistence', async (t) => {
+  const taskHome = await mkdtemp(join(tmpdir(), 'cascan-alert-state-'));
+  t.after(() => rm(taskHome, { recursive: true, force: true }));
+  const moduleUrl = new URL('../src/alert/state.js', import.meta.url).href;
+  const env = { ...process.env, HOME: taskHome };
+  const writeScript = `
+    const state = await import(${JSON.stringify(moduleUrl)});
+    await state.writeAlertState('key', { lastFiredAt: 123, lastConditionResult: true });
+    process.stdout.write(JSON.stringify(await state.readAlertState('key')));
+  `;
+  const { stdout } = await execFileAsync(process.execPath, ['--input-type=module', '--eval', writeScript], { env });
+  assert.deepEqual(JSON.parse(stdout), { lastFiredAt: 123, lastConditionResult: true });
+
+  const statePath = join(taskHome, '.cascan', 'alerts.json');
+  assert.deepEqual(JSON.parse(await readFile(statePath, 'utf8')), {
+    key: { lastFiredAt: 123, lastConditionResult: true },
+  });
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(statePath)).mode & 0o777, 0o600);
+  }
+
+  await writeFile(statePath, '{corrupted json', { mode: 0o600 });
+  const readScript = `
+    const state = await import(${JSON.stringify(moduleUrl)});
+    await state.readAlertState('key');
+  `;
+  await assert.rejects(
+    () => execFileAsync(process.execPath, ['--input-type=module', '--eval', readScript], { env }),
+    error => {
+      assert.match(error.stderr, /alert state unavailable/);
+      return true;
+    },
+  );
 });

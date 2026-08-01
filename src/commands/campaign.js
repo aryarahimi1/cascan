@@ -34,6 +34,8 @@ import { renderCampaign, sanitize } from '../cli/render.js';
 import { gray, cyan } from '../cli/theme.js';
 import { postWebhook } from './webhook.js';
 import { computeProgress, parseGoalBch } from '../campaign/progress.js';
+import { createCoalescedTask } from '../subscriptions/coalesced-task.js';
+import { durableWebhookKey } from './idempotency.js';
 
 export { computeProgress, parseGoalBch } from '../campaign/progress.js';
 
@@ -88,6 +90,12 @@ export async function cmdCampaign(parsed) {
         height: tip?.height ?? null,
         server: pool.current,
       },
+      webhookStateKey: durableWebhookKey(
+        'campaign.state',
+        rec.cashaddr,
+        raisedSats,
+        hist.map(record => [record.tx_hash, record.height]),
+      ),
       failures,
       priceMeta: price.meta ?? null,
       fulcrum: balQr,
@@ -103,13 +111,9 @@ export async function cmdCampaign(parsed) {
     warnings: [...rec.warnings, ...failures],
   });
 
-  const fireWebhook = async (env) => {
+  const fireWebhook = async (env, idempotencyKey) => {
     if (!parsed.webhook) return;
-    try {
-      await postWebhook(parsed.webhook, env);
-    } catch (err) {
-      process.stderr.write(`! webhook failed: ${err.message}\n`);
-    }
+    await postWebhook(parsed.webhook, env, { idempotencyKey });
   };
 
   try {
@@ -123,46 +127,57 @@ export async function cmdCampaign(parsed) {
     }
 
     // Live mode: NDJSON updates after each reconciled status trigger.
-    const emit = (event, snap) => {
-      const env = wrapEvent(SCHEMA.CAMPAIGN, event, {
-        data: snap.data ?? snap,
-        meta: buildMeta(snap.failures ?? [], snap.priceMeta ?? null, snap.fulcrum),
-      });
+    const envelope = (event, snap) => wrapEvent(SCHEMA.CAMPAIGN, event, {
+      data: snap.data ?? snap,
+      meta: buildMeta(snap.failures ?? [], snap.priceMeta ?? null, snap.fulcrum),
+    });
+    const outputEnvelope = (env) => {
       if (parsed.json) emitNDJSON(env);
-      else if (event === 'progress' || event === 'goal-reached') {
+      else if (env.event === 'progress' || env.event === 'goal-reached') {
         process.stdout.write(renderCampaign(env.data, parsed.verbose, { inline: true }) + '\n');
       }
       return env;
     };
+    const emit = (event, snap) => outputEnvelope(envelope(event, snap));
+
+    const campaignKey = (event, snap) => {
+      const data = snap.data ?? snap;
+      return event === 'goal-reached'
+        ? durableWebhookKey('campaign.goal', data.address, data.goalSats)
+        : durableWebhookKey('campaign.progress', snap.webhookStateKey);
+    };
 
     let last = first;
     let goalAnnounced = first.data.reached;
-    await fireWebhook(emit('progress', first));
-    if (first.data.reached) await fireWebhook(emit('goal-reached', first));
+    const firstProgress = envelope('progress', first);
+    await fireWebhook(firstProgress, campaignKey('progress', first));
+    outputEnvelope(firstProgress);
+    if (first.data.reached) {
+      const firstGoal = envelope('goal-reached', first);
+      await fireWebhook(firstGoal, campaignKey('goal-reached', first));
+      outputEnvelope(firstGoal);
+    }
 
     if (!parsed.json) {
       process.stderr.write(gray(`  tracking campaign via ${cyan(sanitize(String(pool.current)))} — pool of ${pool.servers.length}, auto-failover — Ctrl+C to stop\n`));
     }
 
-    let busy = false, dirty = false;
-    const onChange = async () => {
-      if (busy) { dirty = true; return; }
-      busy = true;
-      try {
-        const next = await snapshot();
-        if (next.data.raisedSats !== last.data.raisedSats || next.data.donorsTxCount !== last.data.donorsTxCount) {
-          last = next;
-          await fireWebhook(emit('progress', next));
-          if (next.data.reached && !goalAnnounced) {
-            goalAnnounced = true;
-            await fireWebhook(emit('goal-reached', next));
-          }
+    const reconcile = async () => {
+      const next = await snapshot();
+      if (next.data.raisedSats !== last.data.raisedSats || next.data.donorsTxCount !== last.data.donorsTxCount) {
+        const progress = envelope('progress', next);
+        await fireWebhook(progress, campaignKey('progress', next));
+        outputEnvelope(progress);
+        if (next.data.reached && !goalAnnounced) {
+          const goal = envelope('goal-reached', next);
+          await fireWebhook(goal, campaignKey('goal-reached', next));
+          outputEnvelope(goal);
+          goalAnnounced = true;
         }
-      } finally {
-        busy = false;
-        if (dirty) { dirty = false; await onChange(); }
+        last = next;
       }
     };
+    const onChange = createCoalescedTask(reconcile);
 
     // Pool-managed subscription: survives failover; current gap state is reconciled.
     pool.on('handler-error', event => {

@@ -41,10 +41,25 @@ verified API before taking a money-moving action.
 
 Subscription delivery is acknowledged in memory. A callback may return a
 promise; a throw, rejection, or timeout emits `handler-error` and retries with
-the same `event.id`. Use that ID as an idempotency key for side effects. A
-timeout cannot cancel JavaScript already running, so a late first attempt may
-overlap its retry. Do not write a handler that charges, credits, broadcasts,
-or sends a webhook twice merely because it ran twice.
+the same `event.id`. That ID can deduplicate attempts within the current
+process/page session, but it changes after a restart. For durable money-moving
+effects, use a blockchain business key such as `txid:vout:action` in a database
+unique constraint and commit that key atomically with the credit/fulfillment.
+A timeout cannot cancel JavaScript already running, so a late first attempt may
+overlap its retry. Always return/await the database or webhook promise; a
+fire-and-forget callback is acknowledged before its side effect is known.
+
+The CLI `watch`, `campaign --watch`, and `alert` webhooks send an
+`Idempotency-Key` header derived from the transaction/action, campaign state,
+or alert edge. Watch/campaign local processed state advances only after the
+webhook returns 2xx. A transport timeout is still ambiguous—the receiver may
+have committed—so webhook receivers must atomically deduplicate that header
+before applying an effect and return 2xx for an already-committed key.
+Alert dedupe-state write failures are surfaced as `fired-state-failed` rather
+than silently pretending restart-safe state was stored.
+The idempotency header is not authentication or a signature. Protect the
+receiver with an unguessable endpoint credential or an authenticating gateway;
+do not authorize money movement merely because a request contains that header.
 
 Observed upstream state is tracked separately from successfully delivered
 state. While one event is awaiting acknowledgement, cascan retains it and
@@ -200,8 +215,10 @@ hard ceilings are listed in [the browser API reference](library.md#browser-api).
 1. Keep strict verification enabled (the default) for financial decisions.
 2. Persist receipts with high-value application decisions.
 3. Treat `watch()` and browser events as triggers to re-query, not proof.
-4. Make async watch handlers idempotent on `event.id`; monitor
-   `handler-error`, and return the side-effect promise so failures are retried.
+4. Make async watch handlers idempotent: use `event.id` for same-process retry
+   attempts and a durable transaction/outpoint/action key across restarts.
+   Monitor `handler-error`, and return the side-effect promise so failures are
+   retried.
 5. Reconcile current state on every process/page start; callback retries are
    not a durable queue.
 6. Handle `QuorumDisagreementError` and `AllServersFailedError` as a
