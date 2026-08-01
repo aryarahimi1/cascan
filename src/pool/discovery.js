@@ -10,10 +10,7 @@
  *   2. seed     — ec-seed.flowee.cash A records (Flowee's DNS seed, built
  *                 by tom because "hardcoding one server puts a target on
  *                 its back"). Returns bare IPv4s; standard ports assumed.
- *   3. features — server.features on responding servers reveals canonical
- *                 hostnames for seeded IPs (probed 2026-07-29:
- *                 116.202.196.52 → fulcrum.criptolayer.net, etc.)
- *   4. gossip   — server.peers.subscribe on responding servers (25–41
+ *   3. gossip   — server.peers.subscribe on responding servers (25–41
  *                 peers each at probe time)
  *
  * Every candidate is VERIFIED before it may serve answers:
@@ -32,9 +29,11 @@
 
 import { resolve4, resolve6 } from 'node:dns/promises';
 import { createHash } from 'node:crypto';
+import { isIP } from 'node:net';
 import { FulcrumClient } from '../fulcrum/client.js';
 import { getNetwork } from '../networks.js';
 import { newHealth, recordSuccess } from './health.js';
+import { isPublicIp } from '../net/public-destination.js';
 
 // Back-compat exports (mainnet values). The per-network truth — including
 // chipnet/testnet4 checkpoints and curated lists — lives in src/networks.js.
@@ -68,18 +67,31 @@ async function mapLimit(items, limit, fn) {
 }
 
 const isOnion = (h) => typeof h === 'string' && h.endsWith('.onion');
-const isIp = (h) => /^\d{1,3}(\.\d{1,3}){3}$/.test(h);
+const isIp = (h) => isIP(h) !== 0;
+
+// Public Fulcrum deployments use a small family of conventional port groups.
+// Gossip is untrusted; constraining it prevents Cascan from becoming a generic
+// public port scanner while retaining the ports observed in BCH fleets.
+const GOSSIP_PORT_GROUPS = Object.freeze([5000, 50000, 51000, 60000, 62000, 62100, 64000]);
+const GOSSIP_ALLOWED_PORTS = new Set(
+  GOSSIP_PORT_GROUPS.flatMap(base => [1, 2, 3, 4].map(offset => base + offset)),
+);
+
+export function isAllowedDiscoveryPort(port) {
+  return Number.isInteger(port) && GOSSIP_ALLOWED_PORTS.has(port);
+}
 
 /**
- * Hostname sanity gate — gossip and server.features are ATTACKER-CONTROLLED
- * input. A "hostname" carrying ANSI escapes, whitespace, or exotic bytes is
- * garbage by definition, so it is rejected at the boundary rather than
- * sanitized at every display sink.
+ * Hostname sanity gate — gossip and cache data are untrusted input. A
+ * "hostname" carrying ANSI escapes, whitespace, or exotic bytes is garbage
+ * by definition, so it is rejected at the boundary rather than sanitized at
+ * every display sink.
  * Accepts DNS names, IPv4, and bare IPv6 literals.
  */
 export function isValidHostname(h) {
   if (typeof h !== 'string' || h.length === 0 || h.length > 253) return false;
-  if (/^[0-9a-f:]+$/i.test(h) && h.includes(':')) return true;      // IPv6 literal
+  if (h.includes(':')) return isIP(h) === 6;
+  if (/^[0-9.]+$/.test(h)) return isIP(h) === 4;
   return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(h);
 }
 
@@ -103,10 +115,11 @@ export function parsePeerEntry(entry) {
   let ssl = null, tcp = null;
   for (const f of entry[2]) {
     if (typeof f !== 'string') continue;
-    if (f[0] === 's') { const p = Number(f.slice(1)); if (Number.isInteger(p) && p > 0 && p < 65536) ssl = p; }
-    if (f[0] === 't') { const p = Number(f.slice(1)); if (Number.isInteger(p) && p > 0 && p < 65536) tcp = p; }
+    if (f[0] === 's') { const p = Number(f.slice(1)); if (isAllowedDiscoveryPort(p)) ssl = p; }
+    if (f[0] === 't') { const p = Number(f.slice(1)); if (isAllowedDiscoveryPort(p)) tcp = p; }
   }
   if (ssl === null && tcp === null) return null;
+  if (isIp(host) && !isPublicIp(host)) return null;
   return { host, ports: { ssl, tcp } };
 }
 
@@ -114,7 +127,7 @@ export function parsePeerEntry(entry) {
  * Try to connect to a candidate over the transports it plausibly supports,
  * most-authenticated first. Returns a live client + transport facts.
  */
-async function connectCandidate(cand, timeoutMs) {
+async function connectCandidate(cand, opts) {
   const attempts = [];
   if (cand.ports.ssl) {
     if (!isIp(cand.host)) attempts.push({ port: cand.ports.ssl, tls: true, reject: true, tlsStrict: true });
@@ -128,7 +141,10 @@ async function connectCandidate(cand, timeoutMs) {
   for (const a of attempts) {
     const client = new FulcrumClient({
       host: cand.host, port: a.port, tls: a.tls,
-      rejectUnauthorized: a.reject, timeoutMs,
+      rejectUnauthorized: a.reject,
+      timeoutMs: opts.probeTimeoutMs,
+      publicOnly: true,
+      lookup: opts.publicLookup,
     });
     const t0 = Date.now();
     try {
@@ -144,13 +160,14 @@ async function connectCandidate(cand, timeoutMs) {
 
 /**
  * Probe one candidate: connect, verify chain checkpoints, collect height,
- * canonical hostname (server.features), and peer gossip.
+ * current height and peer gossip. Remote metadata cannot rewrite the exact
+ * endpoint that was validated.
  *
  * @returns {{ server: object, gossip: Array }} verified record + raw peers
  * @throws on unreachable / wrong chain / protocol failure
  */
 async function probeCandidate(cand, opts) {
-  const { client, latencyMs, tlsStrict, transport, port } = await connectCandidate(cand, opts.probeTimeoutMs);
+  const { client, latencyMs, tlsStrict, transport, port } = await connectCandidate(cand, opts);
   try {
     // Chain identity — every checkpoint must match, or the server is on the
     // wrong chain for this network (BTC/BSV for mainnet; testnet4 vs
@@ -165,23 +182,6 @@ async function probeCandidate(cand, opts) {
 
     const tip = await client.request('blockchain.headers.subscribe').catch(() => null);
 
-    // Canonical hostname + advertised ports from the server itself.
-    let features = null;
-    try { features = await client.request('server.features'); } catch { /* optional */ }
-    let canonicalHost = cand.host;
-    let ports = { ...cand.ports };
-    if (features?.hosts && typeof features.hosts === 'object') {
-      for (const [h, p] of Object.entries(features.hosts)) {
-        if (isOnion(h) || !isValidHostname(h) || typeof p !== 'object' || p === null) continue;
-        // Prefer a real hostname over a bare IP for the canonical record.
-        if (!isIp(h) && isIp(canonicalHost)) canonicalHost = h;
-        if (h === canonicalHost) {
-          if (Number.isInteger(p.ssl_port)) ports.ssl = p.ssl_port;
-          if (Number.isInteger(p.tcp_port)) ports.tcp = p.tcp_port;
-        }
-      }
-    }
-
     let gossip = [];
     try {
       const peers = await client.request('server.peers.subscribe');
@@ -193,8 +193,8 @@ async function probeCandidate(cand, opts) {
 
     return {
       server: {
-        host: canonicalHost,
-        ports,
+        host: cand.host,
+        ports: { ...cand.ports },
         source: cand.source,
         transport,
         port,
@@ -202,7 +202,7 @@ async function probeCandidate(cand, opts) {
         software: cleanMetaString(client.serverVersion?.[0]),
         protocol: cleanMetaString(client.serverVersion?.[1], 16),
         verified: true,
-        aliases: canonicalHost !== cand.host ? [cand.host] : [],
+        aliases: [],
         health,
       },
       gossip,
@@ -248,10 +248,16 @@ export async function discoverServers(options = {}) {
 
   // ── Candidate assembly ────────────────────────────────────────────────
   const candidates = [];
+  const rejected = [];
   const seen = new Set(); // dedupe by host
 
   const addCandidate = (host, ports, source) => {
     if (!host || isOnion(host) || !isValidHostname(host) || seen.has(host)) return;
+    if (isIp(host) && !isPublicIp(host)) {
+      rejected.push({ host, reason: 'destination is not a public IP address' });
+      seen.add(host);
+      return;
+    }
     seen.add(host);
     candidates.push({ host, ports, source });
   };
@@ -281,7 +287,6 @@ export async function discoverServers(options = {}) {
 
   // ── Probe wave 1: curated + seed ──────────────────────────────────────
   const servers = [];
-  const rejected = [];
   const gossipPool = [];
   const acceptedHosts = new Set();
 
@@ -300,7 +305,10 @@ export async function discoverServers(options = {}) {
       if (acceptedHosts.has(key)) continue; // canonical-host dedupe (IP → hostname)
       acceptedHosts.add(key);
       for (const a of r.server.aliases) acceptedHosts.add(a);
-      servers.push(r.server);
+      // Security policy travels with the record. Direct consumers of the
+      // exported discoverServers() result must receive the same DNS/IP guard
+      // as resolvePool(), ServerPool, and the quorum adapters.
+      servers.push({ ...r.server, publicOnly: true });
       gossipPool.push(...r.gossip);
     }
   };

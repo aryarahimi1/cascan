@@ -10,11 +10,33 @@
  *   opts.discover: false   — same, programmatic
  */
 
-import { discoverServers } from './discovery.js';
+import { discoverServers, isAllowedDiscoveryPort, isValidHostname } from './discovery.js';
 import { loadServerCache, saveServerCache } from './cache.js';
 import { ServerPool } from './pool.js';
 import { rankServers } from './health.js';
 import { quorumServers } from '../fulcrum/servers.js';
+import { isIP } from 'node:net';
+import { isPublicIp } from '../net/public-destination.js';
+import { serverDialTarget } from './transport.js';
+
+function markPublicRecords(records) {
+  return records.map(record => ({ ...record, publicOnly: true }));
+}
+
+/** Old cache data is untrusted input and must satisfy today's endpoint policy. */
+export function hardenCachedServers(records) {
+  if (!Array.isArray(records) || records.length === 0) return null;
+  const hardened = [];
+  for (const record of records) {
+    if (!record || record.verified !== true || !isValidHostname(record.host)) return null;
+    if (isIP(record.host) !== 0 && !isPublicIp(record.host)) return null;
+    let target;
+    try { target = serverDialTarget(record); } catch { return null; }
+    if (!isAllowedDiscoveryPort(target.port)) return null;
+    hardened.push({ ...record, publicOnly: true });
+  }
+  return hardened;
+}
 
 /**
  * Resolve the server pool: cache → discovery → curated fallback.
@@ -29,14 +51,18 @@ export async function resolvePool(opts = {}) {
   const curated = quorumServers(network);
 
   if (opts.discover === false || process.env.CASCAN_NO_DISCOVERY) {
-    return { servers: curated, origin: 'curated' };
+    return { servers: markPublicRecords(curated), origin: 'curated' };
   }
 
   if (!opts.forceProbe) {
     const cached = await loadServerCache({ path: opts.cachePath, network, ttlMs: opts.cacheTtlMs });
     if (cached) {
-      log(`server pool from cache (${cached.servers.length} servers, ${Math.round((Date.now() - cached.updatedAt) / 60000)}m old)`);
-      return { servers: cached.servers, origin: 'cache' };
+      const hardened = hardenCachedServers(cached.servers);
+      if (hardened) {
+        log(`server pool from cache (${hardened.length} servers, ${Math.round((Date.now() - cached.updatedAt) / 60000)}m old)`);
+        return { servers: hardened, origin: 'cache' };
+      }
+      log('server cache rejected by current public-endpoint policy — rediscovering');
     }
   }
 
@@ -44,13 +70,13 @@ export async function resolvePool(opts = {}) {
     const d = await discoverServers({ onLog: log, network });
     if (d.servers.length > 0) {
       await saveServerCache(d.servers, { path: opts.cachePath, network, meta: d.meta });
-      return { servers: d.servers, origin: 'discovery', discovery: d };
+      return { servers: markPublicRecords(d.servers), origin: 'discovery', discovery: d };
     }
     log('discovery returned no servers — using curated fallback');
   } catch (err) {
     log(`discovery failed (${err.message}) — using curated fallback`);
   }
-  return { servers: curated, origin: 'curated' };
+  return { servers: markPublicRecords(curated), origin: 'curated' };
 }
 
 /** Discovery/pool record → quorum-layer server entry. */
@@ -62,6 +88,7 @@ export function toQuorumEntry(record) {
     ...(record.port != null ? { port: record.port } : {}),
     rejectUnauthorized: record.tlsStrict !== false,
     operator: record.operator ?? record.source ?? 'curated',
+    ...(record.publicOnly === true ? { publicOnly: true } : {}),
   };
 }
 

@@ -54,6 +54,7 @@ export class ServerPool extends EventEmitter {
         transport: target.transport,
         rejectUnauthorized: server.tlsStrict !== false,
         timeoutMs: this.timeoutMs,
+        publicOnly: server.publicOnly === true,
       });
     });
 

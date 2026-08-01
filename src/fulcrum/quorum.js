@@ -57,6 +57,7 @@ async function callOne(serverEntry, method, params, timeoutMs, extras = []) {
     transport: target.transport,
     rejectUnauthorized: serverEntry.rejectUnauthorized !== false,
     timeoutMs,
+    publicOnly: serverEntry.publicOnly === true,
   });
   const started = Date.now();
   try {

@@ -33,6 +33,14 @@ Address subscription callbacks are validated status-change signals, not
 payment proofs. On a callback, refetch the relevant state through the default
 verified API before taking a money-moving action.
 
+Automatic Node discovery treats DNS seed, gossip, and cached endpoints as
+untrusted. It rejects private, loopback, link-local, metadata, multicast,
+documentation, benchmarking, and reserved destinations; rejects mixed
+public/private DNS answers; restricts gossiped ports; and pins the validated
+DNS answer into the outbound socket. An explicit `servers` pool skips
+automatic discovery and remains caller-controlled, so do not populate it from
+untrusted input.
+
 ## CashScript and mainnet-js providers
 
 `CascanNetworkProvider.getUtxos()` and

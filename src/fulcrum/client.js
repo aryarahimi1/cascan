@@ -13,6 +13,7 @@ import net from 'node:net';
 import tls from 'node:tls';
 import { once } from 'node:events';
 import { createHash, randomBytes } from 'node:crypto';
+import { createPinnedLookup, resolvePublicAddresses } from '../net/public-destination.js';
 
 // ---------------------------------------------------------------------------
 // Minimal RFC 6455 WebSocket client framing — zero dependencies.
@@ -145,13 +146,9 @@ export class FulcrumClient {
 
   /**
    * @param {{ host: string, port: number, tls?: boolean,
-   *           rejectUnauthorized?: boolean, timeoutMs?: number,
-   *           name?: string }} opts
-   */
-  /**
-   * @param {{ host: string, port: number, tls?: boolean,
    *           transport?: 'tcp'|'ssl'|'ws'|'wss',
    *           rejectUnauthorized?: boolean, timeoutMs?: number,
+   *           publicOnly?: boolean, lookup?: Function,
    *           name?: string }} opts
    */
   constructor(opts) {
@@ -163,6 +160,8 @@ export class FulcrumClient {
     this.rejectUnauthorized = opts.rejectUnauthorized !== false; // default true
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     this.name = opts.name ?? `${this.host}:${this.port}`;
+    this.publicOnly = opts.publicOnly === true;
+    this._lookup = opts.lookup;
 
     this._socket = null;
     this._buffer = '';           // JSON line buffer (all transports)
@@ -184,6 +183,18 @@ export class FulcrumClient {
       port: this.port,
       rejectUnauthorized: this.rejectUnauthorized,
     };
+    if (this.publicOnly) {
+      try {
+        const addresses = await resolvePublicAddresses(this.host, { lookup: this._lookup });
+        socketOpts.lookup = createPinnedLookup(addresses);
+      } catch (err) {
+        throw new FulcrumError(err?.message ?? String(err), {
+          server: this.name,
+          kind: 'transport',
+          code: err?.code ?? 'EACCES',
+        });
+      }
+    }
     // SNI: needed by servers behind valid certs on shared IPs. Node forbids
     // an IP literal as servername (RFC 6066) — discovered-by-IP servers
     // (DNS seed) connect without SNI and cannot present a matching cert,

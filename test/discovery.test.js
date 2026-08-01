@@ -19,7 +19,7 @@ test('peers: hostname entry with ssl+tcp ports', () => {
   assert.deepEqual(p, { host: 'bch.loping.net', ports: { ssl: 50002, tcp: 50001 } });
 });
 
-test('peers: IP-only entry, non-standard tcp port', () => {
+test('peers: hostname entry on an allowed short Electrum port', () => {
   const p = parsePeerEntry(['193.138.218.77', 'se-mma.mullvad.net', ['v1.6', 't5001']]);
   assert.deepEqual(p, { host: 'se-mma.mullvad.net', ports: { ssl: null, tcp: 5001 } });
 });
@@ -30,6 +30,10 @@ test('peers: onion peers skipped; garbage skipped; portless skipped', () => {
   assert.equal(parsePeerEntry(['1.2.3.4', 'host', 'not-an-array']), null);
   assert.equal(parsePeerEntry(null), null);
   assert.equal(parsePeerEntry(['1.2.3.4', 'host', ['s99999999']]), null, 'port out of range');
+  assert.equal(parsePeerEntry(['1.2.3.4', 'host', ['s443', 't22']]), null, 'arbitrary service ports');
+  assert.equal(parsePeerEntry(['127.0.0.1', '127.0.0.1', ['s50002']]), null, 'loopback literal');
+  assert.equal(parsePeerEntry(['169.254.169.254', '169.254.169.254', ['s50002']]), null, 'metadata literal');
+  assert.equal(parsePeerEntry(['10.0.0.1', '10.0.0.1', ['s50002']]), null, 'private literal');
 });
 
 // Gossip hostnames are attacker-controlled input.
@@ -95,19 +99,20 @@ function fakeProbeFactory(behavior) {
 
 const CURATED = [{ host: 'curated.example', ports: { ssl: 50002, tcp: 50001 } }];
 
-test('discovery: seed IPs + curated probed; canonical hostname replaces IP', async () => {
+test('discovery: seed IPs and curated candidates are probed without endpoint rewriting', async () => {
   const d = await discoverServers({
     curated: CURATED,
     dnsResolve: async () => ['1.1.1.1'],
     probe: fakeProbeFactory({
       'curated.example': {},
-      '1.1.1.1': { canonical: 'seeded.example' },
+      '1.1.1.1': {},
     }),
   });
   const hosts = d.servers.map(s => s.host).sort();
-  assert.deepEqual(hosts, ['curated.example', 'seeded.example']);
-  const seeded = d.servers.find(s => s.host === 'seeded.example');
-  assert.deepEqual(seeded.aliases, ['1.1.1.1']);
+  assert.deepEqual(hosts, ['1.1.1.1', 'curated.example']);
+  assert.ok(d.servers.every(server => server.publicOnly === true));
+  const seeded = d.servers.find(s => s.host === '1.1.1.1');
+  assert.deepEqual(seeded.aliases, []);
   assert.equal(d.meta.sources.curated, 1);
   assert.equal(d.meta.sources.seed, 1);
 });
@@ -152,6 +157,22 @@ test('discovery: DNS seed down → curated still probed, no throw', async () => 
   });
   assert.equal(d.servers.length, 1);
   assert.equal(d.meta.seedIps, 0);
+});
+
+test('discovery: private and metadata seed addresses are rejected before probing', async () => {
+  const probed = [];
+  const d = await discoverServers({
+    curated: [],
+    dnsResolve: async () => ['127.0.0.1', '10.0.0.8', '169.254.169.254', '1.1.1.1'],
+    probe: async (candidate) => {
+      probed.push(candidate.host);
+      return fakeProbeFactory({ '1.1.1.1': {} })(candidate);
+    },
+  });
+  assert.deepEqual(probed, ['1.1.1.1']);
+  assert.equal(d.servers.length, 1);
+  assert.equal(d.rejected.length, 3);
+  assert.ok(d.rejected.every(record => /not a public IP/.test(record.reason)));
 });
 
 test('discovery: everything dead → empty pool, all rejections recorded', async () => {
