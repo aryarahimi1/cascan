@@ -146,11 +146,24 @@ class FakeClient {
     this.name = spec.name;
     this.connected = false;
     this._notify = [];
-    this._socket = { once() {}, destroyed: false };
+    this._closeHandlers = new Set();
+    this._rejectConnect = null;
+    this.closeCalls = 0;
+    this._socket = {
+      once: (event, fn) => {
+        if (event === 'close') this._closeHandlers.add(fn);
+      },
+      destroyed: false,
+    };
     this.serverVersion = ['FakeFulcrum 1.0', '1.6'];
     this.subscribed = [];
   }
   async connect() {
+    if (this.spec.hangConnect) {
+      await new Promise((resolve, reject) => {
+        this._rejectConnect = reject;
+      });
+    }
     await this.spec.connectGate;
     if (this.spec.connectFails) throw new Error(`connect timeout after 1ms`);
     this.connected = true;
@@ -173,7 +186,16 @@ class FakeClient {
   }
   onNotification(fn) { this._notify.push(fn); }
   fireNotification(method, params) { for (const fn of this._notify) fn(method, params); }
-  close() { this.connected = false; }
+  close() {
+    this.closeCalls++;
+    this._rejectConnect?.(new Error('connect cancelled'));
+    this._rejectConnect = null;
+    this.connected = false;
+  }
+  die() {
+    this.connected = false;
+    for (const fn of this._closeHandlers) fn();
+  }
 }
 
 function makePool(specs, opts = {}) {
@@ -316,6 +338,26 @@ test('pool: close wins a race with an in-flight connection', async () => {
   assert.equal(pool._recoveryTimer, null);
 });
 
+test('pool: close actively cancels a candidate that never connects', async () => {
+  const { pool, clients } = makePool([
+    { name: 'alpha', hangConnect: true, handlers: {} },
+  ]);
+
+  const pending = pool.acquire();
+  await Promise.resolve();
+  pool.close();
+
+  await assert.rejects(
+    Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('candidate was not cancelled')), 50)),
+    ]),
+    /pool closed/,
+  );
+  assert.ok(clients.get('alpha').closeCalls >= 1);
+  assert.equal(pool._candidateClient, null);
+});
+
 test('pool: an open server circuit is skipped even when it would rank fastest', async () => {
   const { pool, created } = makePool([
     { name: 'alpha', handlers: { 'blockchain.headers.subscribe': tipHandler } },
@@ -450,6 +492,86 @@ test('pool: an exhausted active pool recovers once with bounded background retri
   assert.deepEqual(seen, [STATUS_B], 'recovery restored and reconciled the subscription');
   assert.equal(scheduled.length, 1);
   assert.equal(pool._recoveryTimer, null);
+});
+
+test('pool: a total outage storm stays bounded and recovers one subscription once', async (t) => {
+  const alpha = {
+    name: 'alpha',
+    connectFails: false,
+    handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'blockchain.address.subscribe': () => STATUS_A,
+      lookup: () => {
+        alpha.connectFails = true;
+        return 'TRANSPORT:network disappeared';
+      },
+    },
+  };
+  const beta = {
+    name: 'beta',
+    connectFails: true,
+    handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'blockchain.address.subscribe': () => STATUS_B,
+      lookup: () => 'recovered',
+    },
+  };
+  const timers = createManualTimers();
+  const { pool, clients, created } = makePool([alpha, beta], {
+    now: timers.now,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    random: () => 0,
+    failureBackoffBaseMs: 100,
+    failureBackoffMaxMs: 100,
+    recoveryBackoffBaseMs: 100,
+    recoveryBackoffMaxMs: 100,
+    retryBudgetAttempts: 4,
+    retryBudgetWindowMs: 1_000,
+  });
+  t.after(() => pool.close());
+  const seen = [];
+  const recovered = [];
+  pool.on('recovered', event => recovered.push(event));
+  await pool.subscribeAddress('bitcoincash:qstorm', status => seen.push(status));
+  const retiredAlpha = clients.get('alpha');
+
+  const failures = await Promise.allSettled(
+    Array.from({ length: 50 }, () => pool.request('lookup')),
+  );
+  assert.ok(failures.every(result => result.status === 'rejected'));
+  assert.ok(
+    [...created.values()].reduce((sum, count) => sum + count, 0) <= 4,
+    'the global dial budget bounds concurrent callers',
+  );
+  assert.equal(timers.size, 1, 'all callers share one recovery timer');
+
+  for (let cycle = 0; cycle < 2; cycle++) {
+    timers.runNext();
+    await waitFor(() => timers.size === 1);
+    assert.equal(pool.current, null);
+    assert.ok(
+      [...created.values()].reduce((sum, count) => sum + count, 0) <= 4 * (cycle + 2),
+      'each retry window remains globally bounded',
+    );
+  }
+
+  beta.connectFails = false;
+  timers.runNext();
+  const foreground = pool.acquire();
+  await foreground;
+  await waitFor(() => recovered.length === 1 && seen.length === 1);
+
+  assert.equal(pool.current, 'beta:50002');
+  assert.equal(created.get('beta'), 4, 'timer and foreground caller shared the recovery connection');
+  assert.deepEqual(seen, [STATUS_B], 'changed subscription state was delivered exactly once');
+  assert.equal(recovered.length, 1);
+  assert.equal(timers.size, 0);
+
+  retiredAlpha.die();
+  await Promise.resolve();
+  assert.equal(pool.current, 'beta:50002', 'a retired socket cannot tear down its replacement');
+  assert.deepEqual(seen, [STATUS_B]);
 });
 
 // ---------------------------------------------------------------------------

@@ -281,6 +281,84 @@ test('browser pool: an exhausted active pool recovers with one bounded timer', a
   assert.equal(pool._recoveryTimer, null);
 });
 
+test('browser pool: a total outage storm stays bounded and recovers one subscription once', async (t) => {
+  const alpha = {
+    name: 'alpha',
+    connectFails: false,
+    responses: {
+      'blockchain.address.subscribe': () => STATUS_A,
+      lookup: () => {
+        alpha.connectFails = true;
+        throw transport('network disappeared');
+      },
+    },
+  };
+  const beta = {
+    name: 'beta',
+    connectFails: true,
+    responses: {
+      'blockchain.address.subscribe': () => STATUS_B,
+      lookup: () => 'recovered',
+    },
+  };
+  const timers = createManualTimers();
+  const { pool, clients, created } = makePool([alpha, beta], {
+    now: timers.now,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    random: () => 0,
+    failureBackoffBaseMs: 100,
+    failureBackoffMaxMs: 100,
+    recoveryBackoffBaseMs: 100,
+    recoveryBackoffMaxMs: 100,
+    retryBudgetAttempts: 4,
+    retryBudgetWindowMs: 1_000,
+  });
+  t.after(() => pool.close());
+  const seen = [];
+  const recovered = [];
+  pool.on('recovered', event => recovered.push(event));
+  await pool.subscribeAddress('bitcoincash:qstorm', status => seen.push(status));
+  const retiredAlpha = clients.get('alpha');
+
+  const failures = await Promise.allSettled(
+    Array.from({ length: 50 }, () => pool.request('lookup')),
+  );
+  assert.ok(failures.every(result => result.status === 'rejected'));
+  assert.ok(
+    [...created.values()].reduce((sum, count) => sum + count, 0) <= 4,
+    'the global dial budget bounds concurrent callers',
+  );
+  assert.equal(timers.size, 1, 'all callers share one recovery timer');
+
+  for (let cycle = 0; cycle < 2; cycle++) {
+    timers.runNext();
+    await waitFor(() => timers.size === 1);
+    assert.equal(pool.current, null);
+    assert.ok(
+      [...created.values()].reduce((sum, count) => sum + count, 0) <= 4 * (cycle + 2),
+      'each retry window remains globally bounded',
+    );
+  }
+
+  beta.connectFails = false;
+  timers.runNext();
+  const foreground = pool.acquire();
+  await foreground;
+  await waitFor(() => recovered.length === 1 && seen.length === 1);
+
+  assert.equal(pool.current, 'wss://beta.example/');
+  assert.equal(created.get('beta'), 4, 'timer and foreground caller shared the recovery connection');
+  assert.deepEqual(seen, [STATUS_B], 'changed subscription state was delivered exactly once');
+  assert.equal(recovered.length, 1);
+  assert.equal(timers.size, 0);
+
+  retiredAlpha.die();
+  await Promise.resolve();
+  assert.equal(pool.current, 'wss://beta.example/', 'a retired socket cannot tear down its replacement');
+  assert.deepEqual(seen, [STATUS_B]);
+});
+
 test('browser pool: setup-close race rejects that candidate', async () => {
   const { pool } = makePool([
     { name: 'alpha', closeDuringSetup: true },

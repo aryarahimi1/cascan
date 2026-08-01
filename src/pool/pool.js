@@ -112,6 +112,7 @@ export class ServerPool extends EventEmitter {
     });
 
     this._client = null;
+    this._candidateClient = null; // in-flight socket; close() must be able to cancel it
     this._current = null;       // server record backing _client
     this._connecting = null;    // in-flight connect promise (serializes failover)
     this._failingOver = null;   // one teardown/reconnect transition at a time
@@ -212,6 +213,7 @@ export class ServerPool extends EventEmitter {
           allowInsecureTransport: this.allowInsecureTransport,
         });
         client = this._clientFactory(server);
+        this._candidateClient = client;
         await client.connect();
         if (this._closed) throw new Error('pool closed');
         let closedDuringSetup = false;
@@ -300,6 +302,8 @@ export class ServerPool extends EventEmitter {
         client?.close();
         if (closing) throw new Error('pool closed');
         this.emit('server-lost', { server: `${server.host}`, error: err.message });
+      } finally {
+        if (this._candidateClient === client) this._candidateClient = null;
       }
     }
 
@@ -871,6 +875,8 @@ export class ServerPool extends EventEmitter {
   close() {
     this._closed = true;
     this._cancelRecovery();
+    this._candidateClient?.close();
+    this._candidateClient = null;
     for (const entry of this._subs.values()) entry.delivery.close();
     for (const entry of this._txSubs.values()) entry.delivery.close();
     this._subs.clear();
