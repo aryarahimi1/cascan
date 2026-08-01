@@ -546,7 +546,6 @@ export class BrowserServerPool {
       if (this._closed || this._client?.connected) return;
       this.acquire().catch(() => { /* _connect schedules the next bounded attempt */ });
     }, recovery.delayMs);
-    this._recoveryTimer.unref?.();
     this.emit('recovery-scheduled', recovery);
     return recovery;
   }

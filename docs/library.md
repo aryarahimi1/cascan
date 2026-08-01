@@ -147,8 +147,9 @@ and the residual trust limits.
 - Whole pool unreachable → the current operation rejects with
   `AllServersFailedError` and emits `exhausted`. An already-active library pool
   schedules one bounded background recovery loop and emits `recovered` after
-  subscriptions have been restored. An initial failed `connect()` schedules
-  nothing because no caller can own or close that pool.
+  subscriptions have been restored. It remains active until `close()`. An
+  initial failed `connect()` schedules nothing because no caller can own or
+  close that pool.
 - Failed endpoints open exponential equal-jitter circuits. One successful
   setup cannot erase their failure debt; 60 seconds of healthy uptime plus a
   successful request/ping is required. A fixed-window global dial budget caps

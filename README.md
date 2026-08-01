@@ -70,7 +70,8 @@ previously connected keeps exactly one bounded background recovery attempt:
 failed endpoints enter exponential equal-jitter cooldowns, all connection
 attempts share a global budget, and failure debt clears only after 60 seconds
 of healthy uptime. `recovery-scheduled` and `recovered` make the outage visible.
-An initial `connect()` failure does not leave an inaccessible background task.
+The recovery lifecycle remains active until `close()`; an initial `connect()`
+failure does not leave an inaccessible background task.
 
 `watch()` callbacks may be synchronous or async. A throw, rejected promise,
 or 30-second timeout emits `handler-error` and retries with bounded backoff
