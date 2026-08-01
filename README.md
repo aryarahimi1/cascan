@@ -309,7 +309,7 @@ validation, failover, browser boundaries, webhooks, and package distribution.
 Report suspected vulnerabilities privately using [the security policy](SECURITY.md),
 not a public issue.
 
-- **SSRF (webhooks):** scheme allowlist, blocked loopback/RFC1918/IMDS/CGNAT
+- **Webhooks:** HTTPS-only transport plus blocked loopback/RFC1918/IMDS/CGNAT
   literals incl. decimal/hex IPv4 and IPv4-mapped IPv6 (`::ffff:a.b.c.d`,
   hex-tail, NAT64, 6to4), redirects refused, 10s timeout, no retries.
   DNS resolution goes through a guarded

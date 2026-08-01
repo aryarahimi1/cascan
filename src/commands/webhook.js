@@ -4,7 +4,7 @@
  * SSRF-conscious webhook POST for watch events.
  *
  * v0.1 scope (documented, not hidden):
- *   - scheme allowlist: http/https only
+ *   - HTTPS only (payloads, URL credentials, and idempotency keys stay encrypted)
  *   - blocks literal loopback / RFC1918 / link-local / IMDS hostnames and IPs
  *   - 10s timeout, no retries, redirects not followed
  * DNS resolution goes through
@@ -15,7 +15,6 @@
  */
 
 import { request as httpsRequest } from 'node:https';
-import { request as httpRequest } from 'node:http';
 import { lookup as dnsLookup } from 'node:dns';
 
 const BLOCKED_HOSTNAMES = new Set(['localhost', 'ip6-localhost', 'metadata', 'metadata.google.internal']);
@@ -92,8 +91,11 @@ export function validateWebhookUrl(urlStr) {
   } catch {
     throw new Error(`invalid webhook URL: ${JSON.stringify(urlStr)}`);
   }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new Error(`webhook URL must be http:// or https:// (got ${url.protocol})`);
+  if (url.protocol !== 'https:') {
+    throw new Error(`webhook URL must use https:// (got ${url.protocol})`);
+  }
+  if (url.username || url.password) {
+    throw new Error('webhook URL must not contain username/password credentials');
   }
   const host = url.hostname.toLowerCase();
   if (BLOCKED_HOSTNAMES.has(host) || isBlockedIpLiteral(host)) {
@@ -140,7 +142,6 @@ function guardedLookup(hostname, options, callback) {
 export async function postWebhook(urlStr, payload, opts = {}) {
   const url = validateWebhookUrl(urlStr);
   const body = JSON.stringify(payload);
-  const request = url.protocol === 'https:' ? httpsRequest : httpRequest;
   const idempotencyKey = opts.idempotencyKey;
   if (idempotencyKey != null && (
     typeof idempotencyKey !== 'string' ||
@@ -151,9 +152,9 @@ export async function postWebhook(urlStr, payload, opts = {}) {
   }
 
   return new Promise((resolve, reject) => {
-    const req = request({
+    const req = httpsRequest({
       hostname: url.hostname,
-      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      port: url.port || 443,
       path: url.pathname + url.search,
       method: 'POST',
       headers: {

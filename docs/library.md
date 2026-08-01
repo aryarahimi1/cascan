@@ -88,6 +88,7 @@ watch/campaign do not commit their local processed state until a 2xx response.
 Receivers must persist that key atomically with the side effect because network
 timeouts are ambiguous, and should return 2xx when a key was already committed.
 The header is not a signature; authenticate the webhook endpoint separately.
+CLI webhook URLs are HTTPS-only and cannot contain username/password credentials.
 
 Every 30 seconds by default, the pool re-issues subscribe calls for a bounded,
 round-robin batch. A changed response enters the same delivery path with

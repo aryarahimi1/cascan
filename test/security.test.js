@@ -18,18 +18,28 @@ test('webhook: public https URLs pass', () => {
   assert.equal(u.hostname, 'hooks.slack.com');
 });
 
-test('webhook: scheme allowlist rejects file/ftp/gopher/data', () => {
-  for (const scheme of ['file:///etc/passwd', 'ftp://x.com/', 'gopher://x.com/', 'data:text/plain,x']) {
-    assert.throws(() => validateWebhookUrl(scheme), /http/);
+test('webhook: HTTPS is mandatory and embedded credentials are rejected', () => {
+  for (const url of [
+    'http://public.example/hook',
+    'file:///etc/passwd',
+    'ftp://x.com/',
+    'gopher://x.com/',
+    'data:text/plain,x',
+  ]) {
+    assert.throws(() => validateWebhookUrl(url), /https/);
   }
+  assert.throws(
+    () => validateWebhookUrl('https://user:secret@example.com/hook'),
+    /must not contain username\/password/,
+  );
 });
 
 test('webhook: loopback/private/IMDS IPv4 literals blocked', () => {
   for (const u of [
-    'http://127.0.0.1/hook', 'http://10.1.2.3/hook', 'http://192.168.1.1/hook',
-    'http://169.254.169.254/latest/meta-data', 'http://172.16.0.1/hook',
-    'http://2130706433/hook',       // decimal IPv4 for 127.0.0.1
-    'http://0x7f000001/hook',       // hex IPv4
+    'https://127.0.0.1/hook', 'https://10.1.2.3/hook', 'https://192.168.1.1/hook',
+    'https://169.254.169.254/latest/meta-data', 'https://172.16.0.1/hook',
+    'https://2130706433/hook',       // decimal IPv4 for 127.0.0.1
+    'https://0x7f000001/hook',       // hex IPv4
   ]) {
     assert.throws(() => validateWebhookUrl(u), /blocked/, `expected blocked: ${u}`);
   }
@@ -37,11 +47,11 @@ test('webhook: loopback/private/IMDS IPv4 literals blocked', () => {
 
 test('webhook: IPv4-mapped IPv6 bypasses are blocked', () => {
   for (const u of [
-    'http://[::ffff:127.0.0.1]/hook',
-    'http://[::ffff:a9fe:a9fe]/hook',      // 169.254.169.254 IMDS
-    'http://[::ffff:7f00:1]/hook',         // hex form of 127.0.0.1
-    'http://[::ffff:c0a8:101]/hook',       // 192.168.1.1
-    'http://[64:ff9b::7f00:1]/hook',       // NAT64-embedded 127.0.0.1
+    'https://[::ffff:127.0.0.1]/hook',
+    'https://[::ffff:a9fe:a9fe]/hook',      // 169.254.169.254 IMDS
+    'https://[::ffff:7f00:1]/hook',         // hex form of 127.0.0.1
+    'https://[::ffff:c0a8:101]/hook',       // 192.168.1.1
+    'https://[64:ff9b::7f00:1]/hook',       // NAT64-embedded 127.0.0.1
   ]) {
     assert.throws(() => validateWebhookUrl(u), /blocked/, `expected blocked: ${u}`);
   }
@@ -49,7 +59,7 @@ test('webhook: IPv4-mapped IPv6 bypasses are blocked', () => {
 
 test('webhook: 6to4 with public embedded IPv4 still allowed', () => {
   // 2002:0801:0101:: embeds 8.1.1.1 (public)  must not be over-blocked
-  const u = validateWebhookUrl('http://[2002:0801:0101::]/hook');
+  const u = validateWebhookUrl('https://[2002:0801:0101::]/hook');
   assert.ok(u);
 });
 
@@ -110,7 +120,7 @@ test('webhook: hostname resolving to loopback blocked at lookup (DNS rebinding)'
   // localtest.me publicly resolves to 127.0.0.1 — the literal check cannot
   // see it, only the guarded lookup can. Skip silently if DNS is unavailable.
   try {
-    await postWebhook('http://localtest.me/hook', { probe: true });
+    await postWebhook('https://localtest.me/hook', { probe: true });
     assert.fail('expected rebinding-style hostname to be blocked');
   } catch (err) {
     if (/ENOTFOUND|EAI_AGAIN/.test(err.message)) return; // offline CI — inconclusive, not a failure

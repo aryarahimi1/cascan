@@ -60,6 +60,7 @@ than silently pretending restart-safe state was stored.
 The idempotency header is not authentication or a signature. Protect the
 receiver with an unguessable endpoint credential or an authenticating gateway;
 do not authorize money movement merely because a request contains that header.
+Webhook URLs must use HTTPS and cannot embed username/password credentials.
 
 Observed upstream state is tracked separately from successfully delivered
 state. While one event is awaiting acknowledgement, cascan retains it and
