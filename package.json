@@ -1,0 +1,71 @@
+{
+  "name": "cascan",
+  "version": "0.4.0-beta.0",
+  "description": "Bitcoin Cash Fulcrum reliability for Node and browsers: discovery, health scoring, failover, restored subscriptions, and strict Node quorum.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": {
+      "browser": "./src/browser/index.js",
+      "node": "./src/index.js",
+      "default": "./src/index.js"
+    },
+    "./browser": "./src/browser/index.js"
+  },
+  "files": [
+    "bin",
+    "docs",
+    "examples",
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "bin": {
+    "cascan": "bin/cascan.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:browser": "playwright test",
+    "test:browser:live": "playwright test --grep @live",
+    "serve:browser": "node scripts/serve-browser-demo.mjs",
+    "start": "node bin/cascan.js",
+    "spike": "node scripts/spike.mjs",
+    "release:check": "node scripts/verify-release.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aryarahimi1/cascan.git"
+  },
+  "homepage": "https://github.com/aryarahimi1/cascan#readme",
+  "bugs": {
+    "url": "https://github.com/aryarahimi1/cascan/issues"
+  },
+  "keywords": [
+    "bitcoin-cash",
+    "bch",
+    "cli",
+    "explorer",
+    "fulcrum",
+    "electrum",
+    "cashtokens",
+    "payments",
+    "0-conf",
+    "webhook",
+    "alerts",
+    "tax",
+    "cost-basis",
+    "zero-dependencies"
+  ],
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  },
+  "license": "MIT"
+}

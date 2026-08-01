@@ -1,0 +1,58 @@
+name: Stage npm release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  stage:
+    name: Verify and stage
+    runs-on: ubuntu-latest
+    environment: npm-production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Actions are pinned to immutable commit SHAs, not floating version tags.
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Install a stage-capable npm CLI
+        run: npm install --global npm@11.16.0
+
+      - name: Require an annotated, version-matched tag
+        run: |
+          test "$(git cat-file -t "$GITHUB_REF")" = tag
+          node scripts/verify-release.mjs "$GITHUB_REF_NAME"
+
+      - name: Run the complete test suite
+        run: npm test
+
+      - name: Inspect the package contents
+        run: npm pack --dry-run
+
+      - name: Select the npm distribution tag
+        run: |
+          if node -e "process.exit(require('./package.json').version.includes('-') ? 0 : 1)"; then
+            echo 'DIST_TAG=next' >> "$GITHUB_ENV"
+          else
+            echo 'DIST_TAG=latest' >> "$GITHUB_ENV"
+          fi
+
+      # Trusted publishing supplies a short-lived OIDC identity. There is no
+      # NODE_AUTH_TOKEN. Staging still requires a maintainer to inspect and
+      # approve the release with 2FA in npm before it becomes installable.
+      - name: Stage package for maintainer approval
+        run: npm stage publish . --access public --tag "$DIST_TAG"

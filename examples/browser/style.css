@@ -1,0 +1,161 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  background: #0c1110;
+  color: #eef8f2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  width: min(920px, calc(100% - 32px));
+  margin: 48px auto;
+}
+
+header,
+section {
+  border: 1px solid #28463a;
+  border-radius: 16px;
+  background: #111b17;
+  padding: 24px;
+  margin-bottom: 16px;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+.eyebrow {
+  color: #62d99c;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.notice {
+  border-left: 3px solid #e3b341;
+  color: #f4dfaa;
+  margin-bottom: 0;
+  padding-left: 12px;
+}
+
+label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 700;
+}
+
+textarea,
+input {
+  width: 100%;
+  border: 1px solid #426c59;
+  border-radius: 8px;
+  background: #09100d;
+  color: inherit;
+  padding: 12px;
+  font: 0.9rem ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  background: #36c980;
+  color: #06130c;
+  cursor: pointer;
+  font-weight: 800;
+  padding: 10px 14px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+#watch-form button {
+  margin-top: 12px;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin: 20px 0 0;
+}
+
+.status-grid div {
+  background: #0a1310;
+  border-radius: 8px;
+  min-width: 0;
+  padding: 12px;
+}
+
+dt {
+  color: #96b7a7;
+  font-size: 0.75rem;
+  margin-bottom: 5px;
+  text-transform: uppercase;
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  border-bottom: 1px solid #28463a;
+  padding: 10px;
+  text-align: left;
+}
+
+td:first-child {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+#events {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.86rem;
+  margin-bottom: 0;
+  padding-left: 24px;
+}
+
+@media (max-width: 680px) {
+  main {
+    margin: 16px auto;
+  }
+
+  header,
+  section {
+    padding: 18px;
+  }
+
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
+}

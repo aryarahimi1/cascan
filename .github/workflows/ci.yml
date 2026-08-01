@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          - '20.10.0'
+          - '22'
+          - '24'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install development tooling without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Run unit and security regressions
+        run: npm test
+
+      - name: Audit the zero-runtime-dependency package
+        if: matrix.node == '24'
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Inspect npm package contents
+        if: matrix.node == '24'
+        run: npm pack --dry-run
+
+  browser:
+    name: Browser ${{ matrix.browser }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        browser:
+          - chromium
+          - firefox
+          - webkit
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install development tooling without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Install browser and operating-system dependencies
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Exercise browser failover and subscription restoration
+        run: npm run test:browser -- --project=${{ matrix.browser }} --grep-invert @live
+
+  live-browser:
+    name: Live browser WSS
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install development tooling without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Exercise live WSS connection and failover
+        run: npm run test:browser:live -- --project=chromium

@@ -1,0 +1,13 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+test('browser demo: has a restrictive CSP and no unsafe HTML sinks', async () => {
+  const html = await readFile(new URL('../examples/browser/index.html', import.meta.url), 'utf8');
+  const script = await readFile(new URL('../examples/browser/app.js', import.meta.url), 'utf8');
+
+  assert.match(html, /default-src 'none'/);
+  assert.match(html, /connect-src wss:/);
+  assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write|eval\(/);
+  assert.match(script, /\.textContent/);
+});

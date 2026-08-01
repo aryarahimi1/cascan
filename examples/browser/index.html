@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src wss:; base-uri 'none'; form-action 'none'"
+    >
+    <title>cascan browser failover demo</title>
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">Bitcoin Cash connection reliability</p>
+        <h1>cascan browser demo</h1>
+        <p>
+          Automatically connect to healthy Fulcrum servers, verify they are on
+          BCH, and watch cascan fail over without losing a subscription.
+        </p>
+        <p class="notice">
+          Privacy: each selected server can see your IP address and the BCH
+          addresses you query. Checkpoints prove chain identity, not that one
+          server's balance response is independently truthful. This demo never
+          handles private keys.
+        </p>
+      </header>
+
+      <section aria-labelledby="connection-heading">
+        <h2 id="connection-heading">1. Connect</h2>
+        <form id="connect-form">
+          <label for="servers">Optional WSS override, one per line</label>
+          <textarea id="servers" rows="4" spellcheck="false"
+            placeholder="Leave blank to let cascan choose"></textarea>
+          <div class="actions">
+            <button id="connect" type="submit">Connect</button>
+            <button id="failover" type="button" disabled>Kill current server</button>
+            <button id="disconnect" type="button" disabled>Disconnect</button>
+          </div>
+        </form>
+
+        <dl class="status-grid" aria-live="polite">
+          <div><dt>Status</dt><dd id="status">Disconnected</dd></div>
+          <div><dt>Current server</dt><dd id="current">—</dd></div>
+          <div><dt>BCH height</dt><dd id="height">—</dd></div>
+        </dl>
+      </section>
+
+      <section aria-labelledby="watch-heading">
+        <h2 id="watch-heading">2. Restore a subscription</h2>
+        <form id="watch-form">
+          <label for="address">CashAddr to watch</label>
+          <input
+            id="address"
+            value="bitcoincash:qr7fzmep8g7h7ymfxy74lgc0v950j3r2959lhtxxsl"
+            autocomplete="off"
+            spellcheck="false"
+          >
+          <button id="watch" type="submit" disabled>Watch address</button>
+        </form>
+        <p id="watch-status" aria-live="polite">No active subscription.</p>
+      </section>
+
+      <section aria-labelledby="pool-heading">
+        <h2 id="pool-heading">Server pool</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Server</th>
+                <th>State</th>
+                <th>Height</th>
+                <th>Latency</th>
+                <th>Failures</th>
+              </tr>
+            </thead>
+            <tbody id="pool"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section aria-labelledby="events-heading">
+        <h2 id="events-heading">Event log</h2>
+        <ol id="events" aria-live="polite"></ol>
+      </section>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

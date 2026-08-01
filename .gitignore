@@ -1,0 +1,13 @@
+node_modules/
+spike-results.*.json
+.DS_Store
+*.log
+playwright-report/
+test-results/
+
+# Local agent configuration and private working notes
+/.claude/
+/.codex/
+/CLAUDE.md
+/AGENTS.md
+/docs/internal/
