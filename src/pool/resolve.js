@@ -17,23 +17,47 @@ import { rankServers } from './health.js';
 import { quorumServers } from '../fulcrum/servers.js';
 import { isIP } from 'node:net';
 import { isPublicIp } from '../net/public-destination.js';
-import { serverDialTarget } from './transport.js';
+import { requireAllowedTransport } from './transport.js';
 
-function markPublicRecords(records) {
-  return records.map(record => ({ ...record, publicOnly: true }));
+function prepareRecords(records, opts = {}) {
+  const prepared = [];
+  for (const record of records) {
+    try {
+      requireAllowedTransport(record, {
+        allowInsecureTransport: opts.allowInsecureTransport === true,
+      });
+    } catch {
+      continue;
+    }
+    prepared.push({
+      ...record,
+      network: opts.network ?? record.network ?? 'mainnet',
+      publicOnly: true,
+    });
+  }
+  return prepared;
 }
 
 /** Old cache data is untrusted input and must satisfy today's endpoint policy. */
-export function hardenCachedServers(records) {
+export function hardenCachedServers(records, opts = {}) {
   if (!Array.isArray(records) || records.length === 0) return null;
   const hardened = [];
   for (const record of records) {
     if (!record || record.verified !== true || !isValidHostname(record.host)) return null;
+    if (record.network != null && record.network !== (opts.network ?? 'mainnet')) return null;
     if (isIP(record.host) !== 0 && !isPublicIp(record.host)) return null;
     let target;
-    try { target = serverDialTarget(record); } catch { return null; }
+    try {
+      target = requireAllowedTransport(record, {
+        allowInsecureTransport: opts.allowInsecureTransport === true,
+      });
+    } catch { return null; }
     if (!isAllowedDiscoveryPort(target.port)) return null;
-    hardened.push({ ...record, publicOnly: true });
+    hardened.push({
+      ...record,
+      network: opts.network ?? record.network ?? 'mainnet',
+      publicOnly: true,
+    });
   }
   return hardened;
 }
@@ -49,15 +73,19 @@ export async function resolvePool(opts = {}) {
   const log = opts.onLog ?? (() => {});
   const network = opts.network ?? 'mainnet';
   const curated = quorumServers(network);
+  const policy = {
+    network,
+    allowInsecureTransport: opts.allowInsecureTransport === true,
+  };
 
   if (opts.discover === false || process.env.CASCAN_NO_DISCOVERY) {
-    return { servers: markPublicRecords(curated), origin: 'curated' };
+    return { servers: prepareRecords(curated, policy), origin: 'curated' };
   }
 
   if (!opts.forceProbe) {
     const cached = await loadServerCache({ path: opts.cachePath, network, ttlMs: opts.cacheTtlMs });
     if (cached) {
-      const hardened = hardenCachedServers(cached.servers);
+      const hardened = hardenCachedServers(cached.servers, policy);
       if (hardened) {
         log(`server pool from cache (${hardened.length} servers, ${Math.round((Date.now() - cached.updatedAt) / 60000)}m old)`);
         return { servers: hardened, origin: 'cache' };
@@ -67,16 +95,20 @@ export async function resolvePool(opts = {}) {
   }
 
   try {
-    const d = await discoverServers({ onLog: log, network });
+    const d = await discoverServers({
+      onLog: log,
+      network,
+      allowInsecureTransport: policy.allowInsecureTransport,
+    });
     if (d.servers.length > 0) {
       await saveServerCache(d.servers, { path: opts.cachePath, network, meta: d.meta });
-      return { servers: markPublicRecords(d.servers), origin: 'discovery', discovery: d };
+      return { servers: prepareRecords(d.servers, policy), origin: 'discovery', discovery: d };
     }
     log('discovery returned no servers — using curated fallback');
   } catch (err) {
     log(`discovery failed (${err.message}) — using curated fallback`);
   }
-  return { servers: markPublicRecords(curated), origin: 'curated' };
+  return { servers: prepareRecords(curated, policy), origin: 'curated' };
 }
 
 /** Discovery/pool record → quorum-layer server entry. */
@@ -87,6 +119,7 @@ export function toQuorumEntry(record) {
     ...(record.transport ? { transport: record.transport } : {}),
     ...(record.port != null ? { port: record.port } : {}),
     rejectUnauthorized: record.tlsStrict !== false,
+    network: record.network ?? 'mainnet',
     operator: record.operator ?? record.source ?? 'curated',
     ...(record.publicOnly === true ? { publicOnly: true } : {}),
   };
@@ -94,17 +127,19 @@ export function toQuorumEntry(record) {
 
 // Process-wide default pool records per network, resolved once (cache makes
 // repeat CLI invocations cheap; a long process shouldn't re-discover per call).
-const _defaultRecords = new Map(); // network → Promise<records>
+const _defaultRecords = new Map(); // network + transport policy → Promise<records>
 
 /** @returns {Promise<Array>} discovery/curated records, health-ranked. */
 export async function defaultPoolRecords(opts = {}) {
   const network = opts.network ?? 'mainnet';
-  if (!_defaultRecords.has(network)) {
-    _defaultRecords.set(network, resolvePool({ ...opts, network }).then(r =>
+  const allowInsecureTransport = opts.allowInsecureTransport === true;
+  const key = `${network}:${allowInsecureTransport ? 'insecure' : 'authenticated'}`;
+  if (!_defaultRecords.has(key)) {
+    _defaultRecords.set(key, resolvePool({ ...opts, network, allowInsecureTransport }).then(r =>
       r.servers.map(s => ({ ...s })) // defensive copy; health mutates
     ));
   }
-  const records = await _defaultRecords.get(network);
+  const records = await _defaultRecords.get(key);
   return records.every(r => r.health) ? rankServers(records) : records;
 }
 
@@ -123,12 +158,22 @@ export async function defaultQuorumEntries(opts = {}) {
  * single-server `connectFirst`. Commands that held one client now hold a
  * pool that survives server death.
  *
- * @param {{ servers?: Array, timeoutMs?: number, onLog?: (m) => void }} [opts]
+ * @param {{ servers?: Array, network?: 'mainnet'|'chipnet'|'testnet4',
+ *           timeoutMs?: number, allowInsecureTransport?: boolean,
+ *           onLog?: (m) => void }} [opts]
  * @returns {Promise<{ pool: ServerPool, server: string }>}
  */
 export async function connectPool(opts = {}) {
-  const servers = opts.servers ?? await defaultPoolRecords({ onLog: opts.onLog, network: opts.network });
-  const pool = new ServerPool(servers, { timeoutMs: opts.timeoutMs });
+  const servers = opts.servers ?? await defaultPoolRecords({
+    onLog: opts.onLog,
+    network: opts.network,
+    allowInsecureTransport: opts.allowInsecureTransport,
+  });
+  const pool = new ServerPool(servers, {
+    network: opts.network,
+    timeoutMs: opts.timeoutMs,
+    allowInsecureTransport: opts.allowInsecureTransport,
+  });
   await pool.acquire();
   return { pool, server: pool.current };
 }

@@ -13,6 +13,7 @@ import { txidFromHex } from '../src/adapters/cashscript.js';
 import { encodeCashAddr } from '../src/cashaddr.js';
 import { ServerPool } from '../src/pool/pool.js';
 import { rawTransaction, outpointForRaw } from './helpers.js';
+import { checkpointHeader } from './checkpoint-fixtures.js';
 
 function fakeCascan(handlers, network = 'mainnet') {
   return {
@@ -200,6 +201,7 @@ class FakeClient {
   async connect() { if (this.spec.connectFails) throw new Error('connect timeout'); this.connected = true; return this; }
   async request(m, p) {
     const h = this.spec.handlers[m];
+    if (!h && m === 'blockchain.block.header') return checkpointHeader(p);
     if (!h) return null;
     const out = h(p, this);
     if (typeof out === 'string' && out.startsWith('TRANSPORT:')) { this.connected = false; throw new Error(out.slice(10)); }

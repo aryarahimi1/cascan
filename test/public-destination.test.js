@@ -111,13 +111,20 @@ test('cache hardening rejects private, arbitrary-port, and unverified records', 
     ports: { ssl: 50002, tcp: 50001 },
     transport: 'ssl',
     port: 50002,
-    tlsStrict: false,
+    tlsStrict: true,
     verified: true,
   };
   assert.equal(hardenCachedServers([valid])?.[0].publicOnly, true);
+  const insecure = { ...valid, tlsStrict: false };
+  assert.equal(hardenCachedServers([insecure]), null);
+  assert.equal(
+    hardenCachedServers([insecure], { allowInsecureTransport: true })?.[0].publicOnly,
+    true,
+  );
   assert.equal(hardenCachedServers([{ ...valid, host: '127.0.0.1' }]), null);
   assert.equal(hardenCachedServers([{ ...valid, port: 8080 }]), null);
   assert.equal(hardenCachedServers([{ ...valid, verified: false }]), null);
+  assert.equal(hardenCachedServers([{ ...valid, network: 'chipnet' }]), null);
 });
 
 test('default curated/discovery records retain public-only dialing through pool and quorum', async () => {

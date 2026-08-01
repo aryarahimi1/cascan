@@ -22,8 +22,10 @@ import { SCHEMA } from '../output/schemas.js';
 import { wrap } from '../output/envelope.js';
 import { sanitize } from '../cli/render.js';
 import { bold, dim, gray, green, red, yellow, cyan } from '../cli/theme.js';
+import { getNetwork } from '../networks.js';
 
 export async function cmdServers(parsed) {
+  const network = getNetwork(parsed.network);
   const chatter = (m) => { if (!parsed.json) process.stderr.write(gray(`  ${m}\n`)); };
   chatter(`probing the ${parsed.network} fleet (DNS seed + gossip + curated) — ~10s`);
 
@@ -59,14 +61,14 @@ export async function cmdServers(parsed) {
     sources: {
       discovery: {
         ok: rows.length > 0,
-        seed: 'ec-seed.flowee.cash',
+        seed: network.dnsSeed,
         seedIps: d.meta.seedIps,
         candidates: d.meta.candidates,
-        note: 'verified = speaks Electrum protocol AND matches BCH fork checkpoints (478559 BTC-split, 556767 BSV-split)',
+        note: `verified = authenticated TLS + Electrum protocol + ${parsed.network} checkpoints (${network.checkpoints.map(cp => cp.height).join(', ')})`,
       },
     },
     partial: rows.length === 0,
-    warnings: rows.length === 0 ? ['discovery found no live servers — curated fallback would be used for queries'] : [],
+    warnings: rows.length === 0 ? ['discovery found no authenticated, checkpoint-matching servers'] : [],
   };
 
   // Human table — pad plain text first, colorize the padded cell after,

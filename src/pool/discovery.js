@@ -19,18 +19,16 @@
  *     block 0, BSV shares history to 556766), so we check the block-header
  *     hash at two fork heights. Wrong-chain servers are rejected loudly.
  *
- * TLS policy (honest, per transport):
- *   - hostname + valid cert  → tlsStrict: true  (authenticated transport)
- *   - hostname/IP, self-signed or IP-SAN-less cert → ssl with
- *     rejectUnauthorized: false (encrypted, UNauthenticated — standard
- *     Electrum practice, surfaced as tlsStrict: false, scored lower)
- *   - tcp only → cleartext (public chain data; still surfaced)
+ * Transport policy:
+ *   - default: certificate-authenticated TLS only
+ *   - explicit allowInsecureTransport: unauthenticated TLS and TCP may be
+ *     probed for diagnostics/non-payment use and are visibly marked insecure
  */
 
 import { resolve4, resolve6 } from 'node:dns/promises';
-import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { FulcrumClient } from '../fulcrum/client.js';
+import { headerHash, verifyBchChain } from '../fulcrum/chain.js';
 import { getNetwork } from '../networks.js';
 import { newHealth, recordSuccess } from './health.js';
 import { isPublicIp } from '../net/public-destination.js';
@@ -47,11 +45,7 @@ const DEFAULTS = {
   gossipPerServer: 12,  // top-of-list peers from each responding server
 };
 
-/** Double-SHA256 of a hex block header, reversed — the block hash. */
-export function headerHash(headerHex) {
-  const h1 = createHash('sha256').update(Buffer.from(headerHex, 'hex')).digest();
-  return createHash('sha256').update(h1).digest().reverse().toString('hex');
-}
+export { headerHash };
 
 /** Bounded-concurrency map; failures land as nulls. */
 async function mapLimit(items, limit, fn) {
@@ -127,15 +121,24 @@ export function parsePeerEntry(entry) {
  * Try to connect to a candidate over the transports it plausibly supports,
  * most-authenticated first. Returns a live client + transport facts.
  */
-async function connectCandidate(cand, opts) {
+export function candidateConnectionAttempts(cand, allowInsecureTransport = false) {
   const attempts = [];
   if (cand.ports.ssl) {
-    if (!isIp(cand.host)) attempts.push({ port: cand.ports.ssl, tls: true, reject: true, tlsStrict: true });
-    attempts.push({ port: cand.ports.ssl, tls: true, reject: false, tlsStrict: false });
+    // IP literals can still authenticate when the certificate has an IP SAN;
+    // Node correctly omits SNI while retaining hostname verification.
+    attempts.push({ port: cand.ports.ssl, tls: true, reject: true, tlsStrict: true });
+    if (allowInsecureTransport === true) {
+      attempts.push({ port: cand.ports.ssl, tls: true, reject: false, tlsStrict: false });
+    }
   }
-  if (cand.ports.tcp) {
+  if (allowInsecureTransport === true && cand.ports.tcp) {
     attempts.push({ port: cand.ports.tcp, tls: false, reject: false, tlsStrict: false, cleartext: true });
   }
+  return attempts;
+}
+
+async function connectCandidate(cand, opts) {
+  const attempts = candidateConnectionAttempts(cand, opts.allowInsecureTransport === true);
 
   let lastErr = null;
   for (const a of attempts) {
@@ -169,16 +172,7 @@ async function connectCandidate(cand, opts) {
 async function probeCandidate(cand, opts) {
   const { client, latencyMs, tlsStrict, transport, port } = await connectCandidate(cand, opts);
   try {
-    // Chain identity — every checkpoint must match, or the server is on the
-    // wrong chain for this network (BTC/BSV for mainnet; testnet4 vs
-    // chipnet for the test networks).
-    for (const cp of opts.checkpoints) {
-      const hex = await client.request('blockchain.block.header', [cp.height]);
-      const got = headerHash(hex);
-      if (got !== cp.hash) {
-        throw new Error(`wrong chain: header @${cp.height} = ${got.slice(0, 16)}… (expected ${opts.networkName} ${cp.hash.slice(0, 16)}…)`);
-      }
-    }
+    await verifyBchChain(client, opts.networkName);
 
     const tip = await client.request('blockchain.headers.subscribe').catch(() => null);
 
@@ -196,6 +190,7 @@ async function probeCandidate(cand, opts) {
         host: cand.host,
         ports: { ...cand.ports },
         source: cand.source,
+        network: opts.networkName,
         transport,
         port,
         tlsStrict,
@@ -222,6 +217,7 @@ async function probeCandidate(cand, opts) {
  *   concurrency?: number,
  *   maxProbes?: number,
  *   gossipPerServer?: number,
+ *   allowInsecureTransport?: boolean,
  *   dnsResolve?: (host: string) => Promise<string[]>,  — injectable for tests
  *   probe?: typeof probeCandidate,                     — injectable for tests
  *   onLog?: (msg: string) => void,
@@ -236,10 +232,11 @@ export async function discoverServers(options = {}) {
   const net = getNetwork(options.network ?? 'mainnet');
   const opts = {
     ...DEFAULTS,
-    checkpoints: net.checkpoints,
-    networkName: net.name,
-    seedHost: net.dnsSeed,
     ...options,
+    // Derived security context cannot be overridden by an internal-looking
+    // property in an options object.
+    networkName: net.name,
+    seedHost: options.seedHost ?? net.dnsSeed,
   };
   const dnsResolve = opts.dnsResolve ?? resolve4;
   const probe = opts.probe ?? probeCandidate;
@@ -308,7 +305,7 @@ export async function discoverServers(options = {}) {
       // Security policy travels with the record. Direct consumers of the
       // exported discoverServers() result must receive the same DNS/IP guard
       // as resolvePool(), ServerPool, and the quorum adapters.
-      servers.push({ ...r.server, publicOnly: true });
+      servers.push({ ...r.server, network: net.name, publicOnly: true });
       gossipPool.push(...r.gossip);
     }
   };

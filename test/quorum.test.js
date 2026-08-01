@@ -4,6 +4,7 @@ import net from 'node:net';
 import { queryQuorum } from '../src/fulcrum/quorum.js';
 import { AllServersFailedError, QuorumDisagreementError } from '../src/fulcrum/errors.js';
 import { parseArgs } from '../src/cli/args.js';
+import { checkpointHeader } from './checkpoint-fixtures.js';
 
 const NO_RESPONSE = Symbol('no-response');
 
@@ -19,6 +20,8 @@ async function startServer(handler) {
         buffer = buffer.slice(newline + 1);
         const result = request.method === 'server.version'
           ? ['quorum-test', '1.4']
+          : request.method === 'blockchain.block.header'
+            ? checkpointHeader(request.params)
           : await handler(request.method, request.params);
         if (result === NO_RESPONSE) continue;
         const response = result instanceof Error
@@ -61,6 +64,7 @@ test('quorum: discovery-verified TCP transport is reused instead of redialing TL
   const qr = await queryQuorum('x.transport', [], {
     mode: 'any',
     servers: [entry(server)],
+    allowInsecureTransport: true,
     timeoutMs: 100,
   });
   assert.equal(qr.value, 'tcp-ok');
@@ -77,6 +81,7 @@ test('quorum: uniform timeouts remain AllServersFailedError', async (t) => {
     () => queryQuorum('x.hang', [], {
       mode: 'any',
       servers: servers.map(server => entry(server)),
+      allowInsecureTransport: true,
       timeoutMs: 30,
     }),
     AllServersFailedError
@@ -93,6 +98,7 @@ test('quorum: uniform daemon errors remain application errors', async (t) => {
     () => queryQuorum('blockchain.transaction.get', ['missing'], {
       mode: 'any',
       servers: servers.map(server => entry(server)),
+      allowInsecureTransport: true,
       timeoutMs: 100,
     }),
     err => {
@@ -114,6 +120,8 @@ test('security quorum: one fabricated answer cannot satisfy minAgreement=2', asy
       mode: 'majority',
       minAgreement: 2,
       servers: servers.map(server => entry(server)),
+      allowInsecureTransport: true,
+      paymentMode: false,
       timeoutMs: 100,
     }),
     QuorumDisagreementError
@@ -130,6 +138,8 @@ test('security quorum: two matching independent endpoints satisfy minAgreement=2
     mode: 'majority',
     minAgreement: 2,
     servers: servers.map(server => entry(server)),
+    allowInsecureTransport: true,
+    paymentMode: false,
     timeoutMs: 100,
   });
   assert.equal(qr.agreementCount, 2);
@@ -150,6 +160,8 @@ test('security quorum: a 2–2 tie cannot satisfy minAgreement=2', async (t) => 
       mode: 'majority',
       minAgreement: 2,
       servers: servers.map(server => entry(server)),
+      allowInsecureTransport: true,
+      paymentMode: false,
       timeoutMs: 100,
     }),
     err => {

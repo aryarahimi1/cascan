@@ -102,6 +102,7 @@ const CURATED = [{ host: 'curated.example', ports: { ssl: 50002, tcp: 50001 } }]
 test('discovery: seed IPs and curated candidates are probed without endpoint rewriting', async () => {
   const d = await discoverServers({
     curated: CURATED,
+    networkName: 'chipnet', // internal-looking override must be ignored
     dnsResolve: async () => ['1.1.1.1'],
     probe: fakeProbeFactory({
       'curated.example': {},
@@ -111,6 +112,7 @@ test('discovery: seed IPs and curated candidates are probed without endpoint rew
   const hosts = d.servers.map(s => s.host).sort();
   assert.deepEqual(hosts, ['1.1.1.1', 'curated.example']);
   assert.ok(d.servers.every(server => server.publicOnly === true));
+  assert.ok(d.servers.every(server => server.network === 'mainnet'));
   const seeded = d.servers.find(s => s.host === '1.1.1.1');
   assert.deepEqual(seeded.aliases, []);
   assert.equal(d.meta.sources.curated, 1);

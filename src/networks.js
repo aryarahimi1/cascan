@@ -72,8 +72,8 @@ export const NETWORKS = Object.freeze({
       { height: 200000, hash: '00000000071ca109d9e44e26c1510922d2913ead12e8d2bd86d7bc7577806d7b' },
     ]),
     curated: Object.freeze([
-      // Probed 2026-07-29: cert expired → tlsStrict:false (encrypted,
-      // unauthenticated). Surfaced in `cascan servers --network testnet4`.
+      // Probed 2026-07-29: certificates were invalid. These require the
+      // explicit non-payment allowInsecureTransport development mode.
       { host: 'testnet4.imaginary.cash', ports: { tcp: 50001, ssl: 50002 }, operator: 'imaginary_username (community)', tlsStrict: false },
       { host: 'tbch4.loping.net', ports: { tcp: 62103, ssl: 62104 }, operator: 'loping.net', tlsStrict: false },
     ]),

@@ -171,6 +171,7 @@ export class FulcrumClient {
     this._pending = new Map();   // id → { resolve, reject, timer, method }
     this._notifyHandlers = [];   // fn(method, params)
     this.serverVersion = null;   // [serverSw, protocol] after connect()
+    this.chainVerified = null;   // network name, set only by verifyBchChain()
     this.connected = false;
   }
 
@@ -196,9 +197,8 @@ export class FulcrumClient {
       }
     }
     // SNI: needed by servers behind valid certs on shared IPs. Node forbids
-    // an IP literal as servername (RFC 6066) — discovered-by-IP servers
-    // (DNS seed) connect without SNI and cannot present a matching cert,
-    // so callers pass rejectUnauthorized: false for those.
+    // an IP literal as servername (RFC 6066). IP targets therefore connect
+    // without SNI and must present a certificate with a matching IP SAN.
     if (this.useTls && net.isIP(this.host) === 0) socketOpts.servername = this.host;
 
     const socket = this.useTls ? tls.connect(socketOpts) : net.connect(socketOpts);
@@ -243,9 +243,15 @@ export class FulcrumClient {
     }
     this.connected = true;
 
-    // Negotiate protocol; failure here means "not an electrum server".
-    this.serverVersion = await this.request('server.version', [CLIENT_NAME, PROTOCOL_RANGE]);
-    return this;
+    // Negotiate protocol; failure here means "not an electrum server". A
+    // failed setup must not leave a half-initialized live socket behind.
+    try {
+      this.serverVersion = await this.request('server.version', [CLIENT_NAME, PROTOCOL_RANGE]);
+      return this;
+    } catch (err) {
+      this.close();
+      throw err;
+    }
   }
 
   /** RFC 6455 client handshake over the already-open socket. */
@@ -380,6 +386,7 @@ export class FulcrumClient {
     }
     this._pending.clear();
     if (this._socket && !this._socket.destroyed) this._socket.destroy();
+    this.chainVerified = null;
     this.connected = false;
   }
 
@@ -433,6 +440,7 @@ export class FulcrumClient {
   }
 
   _onClose() {
+    this.chainVerified = null;
     this.connected = false;
     this._onSocketError(new FulcrumError('connection closed', { server: this.name, kind: 'transport' }));
   }

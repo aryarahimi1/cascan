@@ -16,15 +16,18 @@ import { connect } from 'cascan/browser';
 
 Discovers the server pool (cache → DNS seed + peer gossip + probing →
 curated fallback), verifies every candidate against chain checkpoints,
-connects to the best-scoring server, and resolves connected — or throws
+then repeats checkpoint verification on the exact pool/quorum sockets that
+serve data. It connects to the best-scoring authenticated-TLS server and
+resolves connected — or throws
 `AllServersFailedError`.
 
 | option | default | meaning |
 |---|---|---|
 | `network` | `'mainnet'` | `'mainnet'` \| `'chipnet'` \| `'testnet4'` — note: chipnet and testnet4 share the `bchtest:` prefix; the `network` option (not the address) selects the chain, and each has its own verified pool + checkpoints |
-| `servers` | discovery | explicit pool (skips discovery AND chain verification — your responsibility) |
+| `servers` | discovery | explicit pool (skips endpoint discovery; every serving socket is still checkpoint-verified and subject to the transport policy) |
 | `discover` | `true` | `false` = curated list only (also: `CASCAN_NO_DISCOVERY=1`) |
 | `verify` | `true` | strict quorum verification on `balance()`/`tx()`/`height()`; `false` is an explicit single-server trade-off |
+| `allowInsecureTransport` | `false` | explicit unauthenticated TLS/TCP escape hatch for diagnostics or non-payment reads; requires `verify: false`, and payment-mode quorum refuses insecure endpoints |
 | `timeoutMs` | `10000` | per-request timeout |
 | `cachePath` | `~/.cascan/servers*.json` | discovery cache location |
 | `onLog` | silent | discovery progress callback |
@@ -133,6 +136,15 @@ rejected rather than returning an unverifiable success.
 
 ## Transports
 
+Automatic discovery, `ServerPool`, and `queryQuorum` accept only
+certificate-authenticated `ssl`/`wss` by default. They do not fall back to
+self-signed TLS or cleartext when authentication fails. Low-level callers may
+explicitly set `allowInsecureTransport: true` for non-payment diagnostics;
+this does not make the connection trustworthy, and high-level verified/payment
+paths reject that configuration. Some testnet4 community endpoints currently
+require this explicit development-only mode because their certificates are not
+valid.
+
 `FulcrumClient` speaks `tcp`, `ssl` (default), `ws`, and `wss` — the
 WebSocket framing is an in-house RFC 6455 client (zero deps):
 
@@ -141,18 +153,23 @@ import { FulcrumClient } from 'cascan';
 const c = new FulcrumClient({ host: 'electrum.imaginary.cash', port: 50004, transport: 'wss' });
 ```
 
+`FulcrumClient` is the raw protocol primitive and does not independently apply
+the pool/quorum transport or checkpoint policy. Use `connect()`, `ServerPool`,
+or `queryQuorum()` for the enforced serving-socket guarantees.
+
 ## Toolbox re-exports
 
 `ServerPool` · `discoverServers` · `resolvePool` · `connectPool` ·
 `rankServers`/`scoreServer`/`newHealth` · `queryQuorum`/`fulcrumMeta` ·
-`QuorumDisagreementError`/`AllServersFailedError` · `FulcrumClient` ·
+`QuorumDisagreementError`/`AllServersFailedError` ·
+`ChainVerificationError`/`InsecureTransportError` · `FulcrumClient` ·
 `parseAddress`/`convertAddress`/`AddressError` · `NETWORKS`/`getNetwork` ·
 `DEFAULT_FULCRUM_SERVERS` · `DNS_SEED`/`CHECKPOINTS`.
 
 ## Guarantees
 
 1. **Zero npm dependencies** — Node built-ins only, forever.
-2. **Chain identity** — a server must match fork-checkpoint header hashes
+2. **Chain identity** — every serving socket must match fork-checkpoint header hashes
    (BTC-split + BSV-split for mainnet; per-network pins for chipnet/testnet4)
    before it may serve a single answer.
 3. **Money is never floated** — satoshis and token amounts are

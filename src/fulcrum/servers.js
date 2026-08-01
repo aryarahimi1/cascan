@@ -10,9 +10,9 @@
  * 50003/50004 (WS/WSS) are probed by scripts/spike.mjs and recorded in
  * README — the no-backend browser dapp depends on WSS availability.
  *
- * TLS note: some public electrum servers still run self-signed certs.
- * Entries carry `rejectUnauthorized: false` only where probing found a
- * self-signed chain; prefer valid-cert servers in quorum mode.
+ * TLS note: automatic/payment paths accept only valid, hostname-authenticated
+ * certificates. Insecure community endpoints remain visible in the network
+ * registry but require an explicit non-payment transport opt-in.
  */
 
 // Probe results 2026-07-28 (scripts/spike.mjs, see spike-results.*.json):

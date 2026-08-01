@@ -41,6 +41,18 @@ DNS answer into the outbound socket. An explicit `servers` pool skips
 automatic discovery and remains caller-controlled, so do not populate it from
 untrusted input.
 
+Discovery does not create a reusable trust token. Every later Node pool and
+quorum socket repeats the selected network's fork-checkpoint checks before it
+may serve an application request or subscription. A cached endpoint that no
+longer matches is rejected and failover continues. Automatic/default Node
+paths require certificate-authenticated TLS and never downgrade after a
+certificate failure.
+
+`allowInsecureTransport: true` exists only for explicit diagnostics and
+development networks. High-level `connect()` requires `verify: false` with
+that option, and payment-mode quorum refuses unauthenticated TLS and TCP.
+Never use the insecure escape hatch to authorize a payment or money movement.
+
 ## CashScript and mainnet-js providers
 
 `CascanNetworkProvider.getUtxos()` and

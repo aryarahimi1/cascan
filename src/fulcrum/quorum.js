@@ -19,9 +19,11 @@
  */
 
 import { FulcrumClient } from './client.js';
+import { verifyBchChain } from './chain.js';
 import { defaultQuorumEntries } from '../pool/resolve.js';
-import { QuorumDisagreementError, AllServersFailedError, isTransportFailure } from './errors.js';
-import { serverDialTarget, serverName } from '../pool/transport.js';
+import { QuorumDisagreementError, AllServersFailedError } from './errors.js';
+import { requireAllowedTransport, serverName } from '../pool/transport.js';
+import { getNetwork } from '../networks.js';
 
 // Re-exported so existing `import { … } from './quorum.js'` sites (bin,
 // commands, library index) keep working after the errors moved.
@@ -49,22 +51,26 @@ function stableStringify(v) {
  *
  * @returns {Promise<{ server: string, value: any, latencyMs: number, extras: Record<string, any> }>}
  */
-async function callOne(serverEntry, method, params, timeoutMs, extras = []) {
-  const target = serverDialTarget(serverEntry);
+async function callOne(serverEntry, method, params, opts) {
+  const target = requireAllowedTransport(serverEntry, {
+    allowInsecureTransport: opts.allowInsecureTransport,
+  });
   const client = new FulcrumClient({
     host: serverEntry.host,
     port: target.port,
     transport: target.transport,
     rejectUnauthorized: serverEntry.rejectUnauthorized !== false,
-    timeoutMs,
+    timeoutMs: opts.timeoutMs,
     publicOnly: serverEntry.publicOnly === true,
   });
   const started = Date.now();
   try {
     await client.connect();
+    // The checkpoint proof runs on the same socket as the application query.
+    await verifyBchChain(client, opts.network);
     const value = await client.request(method, params);
     const extraResults = {};
-    for (const ex of extras) {
+    for (const ex of opts.extras) {
       try {
         extraResults[ex.key] = await client.request(ex.method, ex.params ?? []);
       } catch {
@@ -83,7 +89,9 @@ async function callOne(serverEntry, method, params, timeoutMs, extras = []) {
  * @param {string} method   - e.g. 'blockchain.scripthash.get_balance'
  * @param {any[]}  params
  * @param {{ mode?: 'any'|'majority'|'all', servers?: Array,
- *           timeoutMs?: number, minAgreement?: number }} [opts]
+ *           network?: 'mainnet'|'chipnet'|'testnet4', timeoutMs?: number,
+ *           minAgreement?: number, allowInsecureTransport?: boolean,
+ *           paymentMode?: boolean }} [opts]
  * @returns {Promise<{
  *   value: any,
  *   answered: string,           // server whose value was returned
@@ -96,12 +104,17 @@ async function callOne(serverEntry, method, params, timeoutMs, extras = []) {
  */
 export async function queryQuorum(method, params = [], opts = {}) {
   let mode = opts.mode ?? 'any';
+  const network = getNetwork(opts.network ?? 'mainnet').name;
   // Default pool is discovery-backed (DNS seed + gossip, cached), curated
   // as fallback — the hardcoded list is no longer the primary source.
-  let servers = opts.servers ?? await defaultQuorumEntries({ network: opts.network });
+  let servers = opts.servers ?? await defaultQuorumEntries({ network });
   const timeoutMs = opts.timeoutMs ?? 10_000;
   const extras = opts.extras ?? [];
   const minAgreement = opts.minAgreement ?? 1;
+  // Payment verification never permits unauthenticated TLS or cleartext,
+  // even if a caller enabled the non-payment escape hatch elsewhere.
+  const paymentMode = opts.paymentMode ?? (minAgreement > 1);
+  const allowInsecureTransport = opts.allowInsecureTransport === true && !paymentMode;
   // A minimum agreement greater than one is a security requirement, so a
   // first-success policy cannot satisfy it.
   if (minAgreement > 1 && mode === 'any') mode = 'majority';
@@ -118,7 +131,9 @@ export async function queryQuorum(method, params = [], opts = {}) {
     const errors = [];
     for (const entry of servers) {
       try {
-        const r = await callOne(entry, method, params, timeoutMs, extras);
+        const r = await callOne(entry, method, params, {
+          timeoutMs, extras, network, allowInsecureTransport,
+        });
         statuses.push({ server: r.server, status: 'ok', latencyMs: r.latencyMs });
         for (const rest of servers.slice(statuses.length)) {
           statuses.push({ server: serverName(rest), status: 'not-tried' });
@@ -143,7 +158,7 @@ export async function queryQuorum(method, params = [], opts = {}) {
     // daemon) is NOT a network failure — surface it plainly instead of
     // claiming all servers failed.
     const messages = new Set(errors.map(e => e.message));
-    if (messages.size === 1 && errors.every(err => !isTransportFailure(err))) {
+    if (messages.size === 1 && errors.every(err => err?.kind === 'application')) {
       throw new Error([...messages][0]);
     }
     throw new AllServersFailedError(errors);
@@ -151,7 +166,9 @@ export async function queryQuorum(method, params = [], opts = {}) {
 
   // majority | all → parallel fan-out
   const settled = await Promise.allSettled(
-    servers.map(entry => callOne(entry, method, params, timeoutMs, extras))
+    servers.map(entry => callOne(entry, method, params, {
+      timeoutMs, extras, network, allowInsecureTransport,
+    }))
   );
 
   const statuses = settled.map((res, i) => {
@@ -167,7 +184,7 @@ export async function queryQuorum(method, params = [], opts = {}) {
     const rejected = settled.filter(r => r.status === 'rejected').map(r => r.reason);
     // Same uniform-error honesty rule as 'any' mode.
     const messages = new Set(rejected.map(e => e?.message ?? String(e)));
-    if (messages.size === 1 && rejected.every(err => !isTransportFailure(err))) {
+    if (messages.size === 1 && rejected.every(err => err?.kind === 'application')) {
       throw new Error([...messages][0]);
     }
     throw new AllServersFailedError(rejected);

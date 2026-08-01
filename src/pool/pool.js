@@ -23,10 +23,12 @@
 
 import { EventEmitter } from 'node:events';
 import { FulcrumClient } from '../fulcrum/client.js';
+import { verifyBchChain } from '../fulcrum/chain.js';
 import { AllServersFailedError, isTransportFailure } from '../fulcrum/errors.js';
 import { newHealth, recordSuccess, recordFailure, recordHeight, rankServers } from './health.js';
-import { serverDialTarget, serverName } from './transport.js';
+import { requireAllowedTransport, serverName } from './transport.js';
 import { isValidBchHeight, isValidElectrumAddressStatus } from '../validation.js';
+import { getNetwork } from '../networks.js';
 
 const KEEPALIVE_MS = 45_000;
 
@@ -34,7 +36,9 @@ export class ServerPool extends EventEmitter {
   /**
    * @param {Array} servers — discovery records ({ host, ports, tlsStrict,
    *        health?, ... }) or curated entries ({ host, ports: { ssl, tcp } })
-   * @param {{ timeoutMs?: number, keepaliveMs?: number,
+   * @param {{ network?: 'mainnet'|'chipnet'|'testnet4',
+   *           timeoutMs?: number, keepaliveMs?: number,
+   *           allowInsecureTransport?: boolean,
    *           clientFactory?: (server: object) => object }} [opts]
    */
   constructor(servers, opts = {}) {
@@ -44,10 +48,14 @@ export class ServerPool extends EventEmitter {
       health: s.health ?? newHealth(),
       tlsStrict: s.tlsStrict ?? true, // curated entries are hostname+valid-cert
     }));
+    this.network = getNetwork(opts.network ?? servers[0]?.network ?? 'mainnet').name;
+    this.allowInsecureTransport = opts.allowInsecureTransport === true;
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     this.keepaliveMs = opts.keepaliveMs ?? KEEPALIVE_MS;
     this._clientFactory = opts.clientFactory ?? ((server) => {
-      const target = serverDialTarget(server);
+      const target = requireAllowedTransport(server, {
+        allowInsecureTransport: this.allowInsecureTransport,
+      });
       return new FulcrumClient({
         host: server.host,
         port: target.port,
@@ -97,28 +105,51 @@ export class ServerPool extends EventEmitter {
 
     for (const server of this.ranked()) {
       if (exclude.has(serverName(server))) continue;
-      const client = this._clientFactory(server);
+      let client;
       const t0 = Date.now();
       try {
+        // Enforce the transport policy before even a custom factory can dial.
+        requireAllowedTransport(server, {
+          allowInsecureTransport: this.allowInsecureTransport,
+        });
+        client = this._clientFactory(server);
         await client.connect();
-        recordSuccess(server.health, Date.now() - t0);
-
-        this._client = client;
-        this._current = server;
-        client.onNotification((method, params) => this._onNotify(method, params));
-        // Height tracking (also warms the header sub for notifications).
-        const tip = await client.request('blockchain.headers.subscribe').catch(() => null);
-        if (tip?.height != null) recordHeight(server.health, tip.height);
-
-        // Socket death → failover, not silence.
+        let closedDuringSetup = false;
         const c = client;
         c._socket?.once('close', () => {
-          if (this._closed || this._client !== c) return;
-          this._failover('connection closed').catch(() => { /* exhausted → emitted */ });
+          if (this._closed) return;
+          if (this._client === c) {
+            this._failover('connection closed').catch(() => { /* exhausted → emitted */ });
+          } else {
+            closedDuringSetup = true;
+          }
         });
+        // Security boundary: this exact live socket cannot become active until
+        // it proves the selected BCH network's fork checkpoints.
+        await verifyBchChain(client, this.network);
+        client.onNotification((method, params) => this._onNotify(method, params));
+        // Height tracking also warms the header subscription. Setup errors are
+        // not optional: a socket that died after its proof must never become
+        // the active client.
+        const tip = await client.request('blockchain.headers.subscribe');
+        if (closedDuringSetup || !client.connected) {
+          const err = new Error('connection closed during verified pool setup');
+          err.kind = 'transport';
+          throw err;
+        }
+
+        recordSuccess(server.health, Date.now() - t0);
+        this._client = client;
+        this._current = server;
+        if (tip?.height != null) recordHeight(server.health, tip.height);
 
         this._startKeepalive();
         await this._resubscribeAll();
+        if (closedDuringSetup || !client.connected) {
+          const err = new Error('connection closed during verified pool setup');
+          err.kind = 'transport';
+          throw err;
+        }
 
         if (previous && previous !== this.current) {
           this.emit('failover', { from: previous, to: this.current, reason: 'reconnect' });
@@ -127,7 +158,7 @@ export class ServerPool extends EventEmitter {
       } catch (err) {
         recordFailure(server.health);
         errors.push(err);
-        client.close();
+        client?.close();
         if (this._client === client) {
           this._stopKeepalive();
           this._client = null;

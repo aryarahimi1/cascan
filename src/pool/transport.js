@@ -6,6 +6,16 @@
 
 const TRANSPORTS = ['ssl', 'tcp', 'wss', 'ws'];
 
+export class InsecureTransportError extends Error {
+  constructor(message, opts = {}) {
+    super(message);
+    this.name = 'InsecureTransportError';
+    this.code = 'INSECURE_TRANSPORT';
+    this.kind = 'configuration';
+    this.server = opts.server;
+  }
+}
+
 export function serverDialTarget(server) {
   const verifiedTransport = TRANSPORTS.includes(server?.transport) ? server.transport : null;
   if (verifiedTransport) {
@@ -26,6 +36,25 @@ export function serverDialTarget(server) {
     return { transport: server?.tls === false ? 'tcp' : 'ssl', port: server.port };
   }
   throw new Error(`server ${server?.host ?? '<unknown>'} has no usable transport`);
+}
+
+/** Certificate-authenticated TLS is the only payment-safe Node transport. */
+export function isAuthenticatedTransport(server, target = serverDialTarget(server)) {
+  return (target.transport === 'ssl' || target.transport === 'wss')
+    && server?.tlsStrict !== false
+    && server?.rejectUnauthorized !== false;
+}
+
+/** Resolve a dial target and fail closed unless insecure use was explicit. */
+export function requireAllowedTransport(server, opts = {}) {
+  const target = serverDialTarget(server);
+  if (!isAuthenticatedTransport(server, target) && opts.allowInsecureTransport !== true) {
+    throw new InsecureTransportError(
+      `server ${server?.host ?? '<unknown>'}:${target.port} does not use certificate-authenticated TLS`,
+      { server: server?.host },
+    );
+  }
+  return target;
 }
 
 export function serverName(server) {

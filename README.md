@@ -34,10 +34,12 @@ await bch.watch('bitcoincash:qr7f…', () => {       // survives server death:
 bch.on('failover', f => console.log(`${f.from} died → now on ${f.to}`));
 ```
 
-Every server in the pool is **verified before it may answer**: it must
-speak the Electrum protocol AND match the BCH fork checkpoints (block
-478559 rejects BTC servers, 556767 rejects BSV) — a gossiped wrong-chain
-server can't poison your balance. Health (latency EMA, height lag,
+Every exact Node socket is **verified before it may answer**: it must use
+certificate-authenticated TLS, speak the Electrum protocol, and match the BCH
+fork checkpoints (block 478559 rejects BTC servers, 556767 rejects BSV).
+Discovery verification is repeated on every later pool and quorum connection,
+so a stale cache or changed endpoint cannot inherit an old trust decision.
+Health (latency EMA, height lag,
 failure history) is scored continuously; the pool is cached in
 `~/.cascan/servers.json` (24h TTL).
 
@@ -269,7 +271,10 @@ not a public issue.
   requires independent retrieval of the exact raw transaction.
 - **Money math:** satoshis and token amounts are BigInt/string end-to-end;
   floats only appear in display-only USD conversion.
-- **TLS:** `rejectUnauthorized` on by default for all Fulcrum connections.
+- **TLS:** automatic Node discovery and all payment-capable defaults require
+  certificate-authenticated TLS and never downgrade to unauthenticated TLS or
+  cleartext. `allowInsecureTransport: true` is an explicit non-payment escape
+  hatch and requires `verify: false`; payment verification still refuses it.
 
 ## Development
 

@@ -13,6 +13,7 @@ import { ServerPool } from '../src/pool/pool.js';
 import { AllServersFailedError } from '../src/fulcrum/errors.js';
 import { toQuorumEntry } from '../src/pool/resolve.js';
 import { MAX_REASONABLE_BCH_HEIGHT } from '../src/validation.js';
+import { checkpointHeader } from './checkpoint-fixtures.js';
 
 // ---------------------------------------------------------------------------
 // health scoring
@@ -114,7 +115,7 @@ test('transport: pool and quorum preserve the discovery-verified TCP endpoint', 
     port: 50001,
     tlsStrict: false,
   };
-  const pool = new ServerPool([record]);
+  const pool = new ServerPool([record], { allowInsecureTransport: true });
   const client = pool._clientFactory(pool.servers[0]);
   assert.equal(client.transport, 'tcp');
   assert.equal(client.port, 50001);
@@ -155,6 +156,7 @@ class FakeClient {
   async request(method, params = []) {
     if (!this.connected) throw new Error('not connected');
     const h = this.spec.handlers[method];
+    if (!h && method === 'blockchain.block.header') return checkpointHeader(params);
     if (!h) return null;
     const out = h(params, this);
     if (typeof out === 'string' && out.startsWith('TRANSPORT:')) {

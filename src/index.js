@@ -68,6 +68,8 @@ export class Cascan extends EventEmitter {
     const qr = await queryQuorum(method, params, {
       mode: opts.mode ?? 'majority',
       servers: entries,
+      network: this.network,
+      paymentMode: true,
       timeoutMs: opts.timeoutMs,
       maxFanout: opts.maxServers ?? 4,
       // `verify()` is a security boundary, so a caller cannot accidentally
@@ -181,6 +183,8 @@ export class Cascan extends EventEmitter {
  *   servers?: Array,        — explicit pool (skips discovery)
  *   discover?: boolean,     — default true: DNS seed + gossip + cache
  *   verify?: boolean,       — default true: quorum-verify balance/tx/height
+ *   allowInsecureTransport?: boolean, — explicit non-payment escape hatch;
+ *                                      requires verify:false
  *   timeoutMs?: number,
  *   cachePath?: string,
  *   onLog?: (m: string) => void,
@@ -188,15 +192,22 @@ export class Cascan extends EventEmitter {
  * @returns {Promise<Cascan>}
  */
 export async function connect(opts = {}) {
-  getNetwork(opts.network ?? 'mainnet'); // fail fast on typos
+  const network = getNetwork(opts.network ?? 'mainnet').name; // fail fast on typos
+  if (opts.allowInsecureTransport === true && opts.verify !== false) {
+    throw new TypeError('allowInsecureTransport is non-payment only and requires verify: false');
+  }
   let servers;
   if (Array.isArray(opts.servers) && opts.servers.length > 0) {
     servers = opts.servers;
   } else {
     ({ servers } = await resolvePool(opts));
   }
-  const pool = new ServerPool(servers, { timeoutMs: opts.timeoutMs });
-  const bch = new Cascan(pool, opts);
+  const pool = new ServerPool(servers, {
+    network,
+    timeoutMs: opts.timeoutMs,
+    allowInsecureTransport: opts.allowInsecureTransport,
+  });
+  const bch = new Cascan(pool, { ...opts, network });
   await pool.acquire(); // fail fast: connect() resolves connected or throws
   return bch;
 }
@@ -209,7 +220,9 @@ export { resolvePool, toQuorumEntry, connectPool } from './pool/resolve.js';
 export { discoverServers, DNS_SEED, CHECKPOINTS } from './pool/discovery.js';
 export { rankServers, scoreServer, newHealth } from './pool/health.js';
 export { queryQuorum, fulcrumMeta } from './fulcrum/quorum.js';
+export { ChainVerificationError } from './fulcrum/chain.js';
 export { QuorumDisagreementError, AllServersFailedError } from './fulcrum/errors.js';
+export { InsecureTransportError } from './pool/transport.js';
 export { FulcrumClient } from './fulcrum/client.js';
 export { DEFAULT_FULCRUM_SERVERS } from './fulcrum/servers.js';
 export { parseAddress, convertAddress, AddressError } from './address.js';
