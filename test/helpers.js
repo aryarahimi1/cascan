@@ -1,5 +1,36 @@
 import { txidFromHex } from '../src/transaction/raw.js';
 
+export function createManualTimers(start = 0) {
+  let now = start;
+  let nextId = 1;
+  const pending = new Map();
+
+  return {
+    now: () => now,
+    setTimeout(fn, delay = 0) {
+      const id = nextId++;
+      pending.set(id, { at: now + Math.max(0, delay), fn });
+      return id;
+    },
+    clearTimeout(id) {
+      pending.delete(id);
+    },
+    get size() {
+      return pending.size;
+    },
+    runNext() {
+      const next = [...pending.entries()]
+        .sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+      if (!next) throw new Error('no pending manual timer');
+      const [id, task] = next;
+      pending.delete(id);
+      now = task.at;
+      task.fn();
+      return id;
+    },
+  };
+}
+
 export function compactSize(value) {
   const n = BigInt(value);
   if (n < 0xfdn) return Buffer.from([Number(n)]);

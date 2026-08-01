@@ -11,6 +11,7 @@ import {
 } from '../src/browser/pool.js';
 import { BrowserFulcrumError } from '../src/browser/client.js';
 import { AllServersFailedError } from '../src/fulcrum/errors.js';
+import { createManualTimers } from './helpers.js';
 
 class FakeBrowserClient {
   constructor(spec) {
@@ -226,7 +227,7 @@ test('browser pool: an open circuit is skipped without opening a WebSocket', asy
   pool.close();
 });
 
-test('browser pool: an exhausted active pool recovers with one bounded timer', async () => {
+test('browser pool: an exhausted active pool recovers with one bounded timer', async (t) => {
   const alpha = {
     name: 'alpha',
     connectFails: false,
@@ -243,7 +244,11 @@ test('browser pool: an exhausted active pool recovers with one bounded timer', a
     connectFails: true,
     responses: { 'blockchain.address.subscribe': () => STATUS_B },
   };
+  const timers = createManualTimers();
   const { pool } = makePool([alpha, beta], {
+    now: timers.now,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
     random: () => 0,
     failureBackoffBaseMs: 100,
     failureBackoffMaxMs: 100,
@@ -252,6 +257,7 @@ test('browser pool: an exhausted active pool recovers with one bounded timer', a
     retryBudgetAttempts: 4,
     retryBudgetWindowMs: 1_000,
   });
+  t.after(() => pool.close());
   const seen = [];
   await pool.subscribeAddress('bitcoincash:qrecovery', status => seen.push(status));
   const scheduled = [];
@@ -263,7 +269,9 @@ test('browser pool: an exhausted active pool recovers with one bounded timer', a
   const recoveryTimer = pool._recoveryTimer;
   await assert.rejects(() => pool.acquire(), AllServersFailedError);
   assert.equal(pool._recoveryTimer, recoveryTimer);
+  assert.equal(timers.size, 1);
   beta.connectFails = false;
+  timers.runNext();
   const event = await recovered;
 
   assert.equal(event.server, 'wss://beta.example/');
@@ -271,7 +279,6 @@ test('browser pool: an exhausted active pool recovers with one bounded timer', a
   assert.deepEqual(seen, [STATUS_B]);
   assert.equal(scheduled.length, 1);
   assert.equal(pool._recoveryTimer, null);
-  pool.close();
 });
 
 test('browser pool: setup-close race rejects that candidate', async () => {

@@ -14,6 +14,7 @@ import { AllServersFailedError } from '../src/fulcrum/errors.js';
 import { toQuorumEntry } from '../src/pool/resolve.js';
 import { MAX_REASONABLE_BCH_HEIGHT } from '../src/validation.js';
 import { checkpointHeader } from './checkpoint-fixtures.js';
+import { createManualTimers } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // health scoring
@@ -393,7 +394,7 @@ test('pool: setup success keeps failure debt until minimum healthy uptime', asyn
   pool.close();
 });
 
-test('pool: an exhausted active pool recovers once with bounded background retries', async () => {
+test('pool: an exhausted active pool recovers once with bounded background retries', async (t) => {
   const alpha = {
     name: 'alpha',
     connectFails: false,
@@ -414,7 +415,11 @@ test('pool: an exhausted active pool recovers once with bounded background retri
       'blockchain.address.subscribe': () => STATUS_B,
     },
   };
+  const timers = createManualTimers();
   const { pool } = makePool([alpha, beta], {
+    now: timers.now,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
     random: () => 0,
     failureBackoffBaseMs: 100,
     failureBackoffMaxMs: 100,
@@ -423,6 +428,7 @@ test('pool: an exhausted active pool recovers once with bounded background retri
     retryBudgetAttempts: 4,
     retryBudgetWindowMs: 1_000,
   });
+  t.after(() => pool.close());
   const seen = [];
   await pool.subscribeAddress('bitcoincash:qrecovery', status => seen.push(status));
   const scheduled = [];
@@ -434,7 +440,9 @@ test('pool: an exhausted active pool recovers once with bounded background retri
   const recoveryTimer = pool._recoveryTimer;
   await assert.rejects(() => pool.acquire(), AllServersFailedError);
   assert.equal(pool._recoveryTimer, recoveryTimer, 'repeated callers share the existing recovery timer');
+  assert.equal(timers.size, 1, 'only one recovery timer is pending');
   beta.connectFails = false;
+  timers.runNext();
   const event = await recovered;
 
   assert.equal(event.server, 'beta:50002');
@@ -442,7 +450,6 @@ test('pool: an exhausted active pool recovers once with bounded background retri
   assert.deepEqual(seen, [STATUS_B], 'recovery restored and reconciled the subscription');
   assert.equal(scheduled.length, 1);
   assert.equal(pool._recoveryTimer, null);
-  pool.close();
 });
 
 // ---------------------------------------------------------------------------
