@@ -120,7 +120,14 @@ Run the browser demo from the repository root:
 ```sh
 npm run serve:browser
 # open http://localhost:4173/examples/browser/
+# FundMe-style chipnet display pilot:
+# open http://localhost:4173/examples/fundme-pilot/
 ```
+
+The [FundMe-style chipnet pilot](docs/fundme-chipnet-pilot.md) is a
+representative campaign monitor, not FundMe production code. It intentionally
+contains no pledge, signing, claim, refund, payout, or payment-authorization
+path: browser progress remains one active server's display-only claim.
 
 The browser build uses automatic WSS bootstrapping rather than Node's DNS/TCP
 discovery because browsers cannot use those APIs. Fulcrum peer gossip usually

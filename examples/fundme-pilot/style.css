@@ -1,0 +1,59 @@
+.danger {
+  border: 2px solid #e05d5d;
+  border-radius: 10px;
+  color: #ffd2d2;
+  margin-bottom: 0;
+  padding: 14px;
+}
+
+.privacy {
+  color: #b6ccbf;
+  margin: 12px 0 0;
+}
+
+#setup-form label:not(:first-child) {
+  margin-top: 16px;
+}
+
+.campaign-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.campaign-grid div {
+  background: #0a1310;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.campaign-grid dd {
+  font-size: 1.35rem;
+  font-weight: 800;
+}
+
+.claim-label {
+  color: #f4dfaa;
+  font-weight: 800;
+  margin-bottom: 0;
+  text-transform: uppercase;
+}
+
+progress {
+  accent-color: #36c980;
+  display: block;
+  height: 18px;
+  width: 100%;
+}
+
+#watch-status {
+  color: #96b7a7;
+  margin: 12px 0 0;
+}
+
+@media (max-width: 680px) {
+  .campaign-grid {
+    grid-template-columns: 1fr;
+  }
+}

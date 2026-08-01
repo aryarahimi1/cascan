@@ -25,6 +25,8 @@ const server = createServer(async (request, response) => {
     const pathname = decodeURIComponent(url.pathname);
     const allowed = pathname === '/examples/browser'
       || pathname.startsWith('/examples/browser/')
+      || pathname === '/examples/fundme-pilot'
+      || pathname.startsWith('/examples/fundme-pilot/')
       || pathname.startsWith('/src/');
     if (!allowed) {
       response.writeHead(404).end();
@@ -45,10 +47,13 @@ const server = createServer(async (request, response) => {
     const headers = {
       'Content-Type': mime.get(extname(target)) ?? 'application/octet-stream',
       'Cache-Control': 'no-store',
+      'Cross-Origin-Resource-Policy': 'same-origin',
+      'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
     };
     if (extname(target) === '.html') {
-      headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src wss:; base-uri 'none'; form-action 'none'";
+      headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
     }
     response.writeHead(200, headers);
     response.end(request.method === 'HEAD' ? undefined : body);
@@ -58,5 +63,5 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(port, '127.0.0.1', () => {
-  console.log(`cascan browser demo: http://127.0.0.1:${port}/examples/browser/`);
+  console.log(`cascan browser examples: http://127.0.0.1:${port}/examples/browser/`);
 });

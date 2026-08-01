@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeProgress, parseGoalBch } from '../src/commands/campaign.js';
+import { formatBch } from '../src/campaign/progress.js';
 
 test('parseGoalBch: valid amounts', () => {
   assert.equal(parseGoalBch('100'), '10000000000');
@@ -49,4 +50,13 @@ test('computeProgress: huge satoshi sums stay exact (float-unsafe range)', () =>
   assert.equal(p.percent, 99.99);
   assert.equal(p.reached, false);
   assert.equal(p.raisedSats, '9999999999999999'); // exact — floats would round this
+});
+
+test('campaign browser math: formats BCH without floating money conversion', () => {
+  assert.equal(formatBch('0'), '0');
+  assert.equal(formatBch('25000000'), '0.25');
+  assert.equal(formatBch('100000001'), '1.00000001');
+  assert.equal(formatBch('-1'), '-0.00000001');
+  assert.throws(() => formatBch('0x10'), /decimal satoshis/);
+  assert.throws(() => computeProgress('1e8', '100000000'), /decimal satoshis/);
 });

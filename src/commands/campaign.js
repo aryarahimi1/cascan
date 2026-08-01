@@ -33,32 +33,9 @@ import { emitNDJSON } from '../output/emit.js';
 import { renderCampaign, sanitize } from '../cli/render.js';
 import { gray, cyan } from '../cli/theme.js';
 import { postWebhook } from './webhook.js';
+import { computeProgress, parseGoalBch } from '../campaign/progress.js';
 
-const SATS_PER_BCH = 100_000_000n;
-
-/** Pure progress computation — unit-tested. */
-export function computeProgress(raisedSats, goalSats) {
-  const raised = BigInt(raisedSats);
-  const goal = goalSats == null ? null : BigInt(goalSats);
-  const percent = goal != null && goal > 0n ? Number((raised * 10_000n) / goal) / 100 : null;
-  return {
-    raisedSats: raised.toString(),
-    goalSats: goal?.toString() ?? null,
-    percent,
-    reached: goal != null && raised >= goal,
-  };
-}
-
-/** Parse a BCH goal string ('10', '0.5') to satoshis. Throws on garbage. */
-export function parseGoalBch(str) {
-  if (!/^\d+(\.\d{1,8})?$/.test(str ?? '')) {
-    const err = new Error(`--goal must be a non-negative BCH amount with ≤8 decimals (got: ${JSON.stringify(str)})`);
-    err.exitCode = 1;
-    throw err;
-  }
-  const [whole, frac = ''] = str.split('.');
-  return (BigInt(whole) * SATS_PER_BCH + BigInt((frac + '00000000').slice(0, 8))).toString();
-}
+export { computeProgress, parseGoalBch } from '../campaign/progress.js';
 
 /** Server-supplied satoshi fields are untrusted — null on malformed. */
 const toSats = (v) => {

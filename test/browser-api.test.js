@@ -133,6 +133,14 @@ test('browser API: rejects economically impossible balances and heights', async 
     : { confirmed: '2100000000000001', unconfirmed: 0 };
   await assert.rejects(() => cascan.height(), /invalid BCH height/);
   await assert.rejects(() => cascan.balance(MAINNET), /impossible BCH balance/);
+
+  for (const balance of [
+    { confirmed: 0, unconfirmed: -1 },
+    { confirmed: '2100000000000000', unconfirmed: 1 },
+  ]) {
+    pool.request = async () => balance;
+    await assert.rejects(() => cascan.balance(MAINNET), /impossible BCH balance/);
+  }
 });
 
 test('browser API: height, balance, request, and server health are browser-safe', async () => {

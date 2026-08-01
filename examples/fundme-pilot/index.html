@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src wss:; base-uri 'none'; form-action 'none'"
+    >
+    <title>cascan FundMe-style chipnet pilot</title>
+    <link rel="stylesheet" href="../browser/style.css">
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">Representative crowdfunding integration</p>
+        <h1>FundMe-style chipnet pilot</h1>
+        <p>
+          Monitor a campaign address through checkpoint-verified WSS,
+          automatic failover, and a subscription restored on the next server.
+        </p>
+        <p class="danger" id="decision-boundary">
+          Display only. The amount below is one active server's claim. This
+          page must never release, claim, refund, sign, or credit money. A
+          financial decision requires independent verification, such as
+          cascan's Node quorum.
+        </p>
+        <p class="privacy">
+          Privacy: each selected Electrum operator can observe your IP address
+          and the campaign CashAddr queried by this page. No private keys or
+          wallet secrets belong in this pilot.
+        </p>
+      </header>
+
+      <section aria-labelledby="setup-heading">
+        <h2 id="setup-heading">Campaign setup</h2>
+        <form id="setup-form">
+          <label for="address">Chipnet campaign CashAddr</label>
+          <input
+            id="address"
+            value="bchtest:qr7fzmep8g7h7ymfxy74lgc0v950j3r295pdnvy3hr"
+            maxlength="256"
+            autocomplete="off"
+            spellcheck="false"
+            required
+          >
+
+          <label for="goal">Goal in BCH</label>
+          <input
+            id="goal"
+            value="1"
+            maxlength="32"
+            inputmode="decimal"
+            autocomplete="off"
+            required
+          >
+
+          <label for="servers">Optional chipnet WSS override, one per line</label>
+          <textarea
+            id="servers"
+            rows="3"
+            maxlength="8192"
+            spellcheck="false"
+            placeholder="Leave blank to use cascan's chipnet bootstrap pool"
+          ></textarea>
+
+          <div class="actions">
+            <button id="connect" type="submit">Start pilot</button>
+            <button id="failover" type="button" disabled>Kill current server</button>
+            <button id="disconnect" type="button" disabled>Disconnect</button>
+          </div>
+        </form>
+
+        <dl class="status-grid" aria-live="polite">
+          <div><dt>Status</dt><dd id="status">Disconnected</dd></div>
+          <div><dt>Current server</dt><dd id="current">—</dd></div>
+          <div><dt>Chipnet height</dt><dd id="height">—</dd></div>
+        </dl>
+      </section>
+
+      <section aria-labelledby="progress-heading">
+        <h2 id="progress-heading">Campaign progress</h2>
+        <p class="claim-label" id="trust-label">Unverified browser display</p>
+        <dl class="campaign-grid" aria-live="polite">
+          <div><dt>Raised</dt><dd id="raised">—</dd></div>
+          <div><dt>Goal</dt><dd id="goal-output">—</dd></div>
+          <div><dt>Progress</dt><dd id="percent">—</dd></div>
+        </dl>
+        <progress id="progress" max="100" value="0">0%</progress>
+        <p id="watch-status">No active subscription.</p>
+      </section>
+
+      <section aria-labelledby="events-heading">
+        <h2 id="events-heading">Pilot event log</h2>
+        <ol id="events" aria-live="polite"></ol>
+      </section>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -88,11 +88,14 @@ export class BrowserCascan {
     const value = await this.pool.request('blockchain.address.get_balance', [cashaddr]);
     const confirmed = sats(value?.confirmed, 'confirmed');
     const unconfirmed = sats(value?.unconfirmed, 'unconfirmed');
+    const total = confirmed + unconfirmed;
     if (
       confirmed < 0n
       || confirmed > MAX_BCH_SATS
       || unconfirmed < -MAX_BCH_SATS
       || unconfirmed > MAX_BCH_SATS
+      || total < 0n
+      || total > MAX_BCH_SATS
     ) {
       throw new BrowserFulcrumError('server returned an impossible BCH balance', {
         server: this.pool.current,
@@ -104,7 +107,7 @@ export class BrowserCascan {
       address: cashaddr,
       confirmedSats: confirmed.toString(),
       unconfirmedSats: unconfirmed.toString(),
-      totalSats: (confirmed + unconfirmed).toString(),
+      totalSats: total.toString(),
     };
   }
 
