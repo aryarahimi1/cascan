@@ -129,18 +129,69 @@ test('mainnetjs: decodeHeader — synthetic 80-byte header round-trips every fie
 });
 
 test('mainnetjs: getRawTransaction with loadInputValues enriches vins from parents', async () => {
+  const childRaw = rawTransaction([{ value: 1n, lockingBytecode: Buffer.from('51', 'hex') }]);
+  const parentRaw = rawTransaction([{ value: 2n, lockingBytecode: Buffer.from('52', 'hex') }]);
+  const child = txidFromHex(childRaw);
+  const parent = txidFromHex(parentRaw);
+  const verified = [];
   const p = new CascanMainnetProvider(fakeCascan({
     'blockchain.transaction.get': ([txid, verbose]) => {
-      if (txid === 'child') {
-        return { txid: 'child', vin: [{ txid: 'parent', vout: 1 }], vout: [] };
+      verified.push(txid);
+      if (txid === child) {
+        return { txid: child, hex: childRaw, vin: [{ txid: parent, vout: 1 }], vout: [] };
       }
       assert.equal(verbose, true);
-      return { txid: 'parent', vout: [{ n: 0, value: 9 }, { n: 1, value: 1.5, scriptPubKey: { addresses: ['x'] } }] };
+      return { txid: parent, hex: parentRaw, vout: [{ n: 0, value: 9 }, { n: 1, value: 1.5, scriptPubKey: { addresses: ['x'] } }] };
     },
   }));
-  const tx = await p.getRawTransaction('child', true, true);
+  const tx = await p.getRawTransaction(child, true, true);
   assert.equal(tx.vin[0].value, 1.5);
   assert.deepEqual(tx.vin[0].scriptPubKey.addresses, ['x']);
+  assert.deepEqual(verified, [child, parent], 'child and enrichment parent both use verify()');
+});
+
+test('mainnetjs: verbose transaction rejects a mismatched requested txid', async () => {
+  const requested = '11'.repeat(32);
+  const p = new CascanMainnetProvider(fakeCascan({
+    'blockchain.transaction.get': () => ({ txid: '22'.repeat(32), hex: '00', vin: [], vout: [] }),
+  }));
+  await assert.rejects(
+    () => p.getRawTransaction(requested, true),
+    /does not match requested txid/,
+  );
+
+  const requestedRaw = rawTransaction([{ value: 1n, lockingBytecode: Buffer.from('51', 'hex') }]);
+  const requestedTxid = txidFromHex(requestedRaw);
+  const wrongRaw = rawTransaction([{ value: 2n, lockingBytecode: Buffer.from('52', 'hex') }]);
+  const wrongBytes = new CascanMainnetProvider(fakeCascan({
+    'blockchain.transaction.get': () => ({ txid: requestedTxid, hex: wrongRaw, vin: [], vout: [] }),
+  }));
+  await assert.rejects(
+    () => wrongBytes.getRawTransaction(requestedTxid, true),
+    /does not match requested txid/,
+  );
+});
+
+test('mainnetjs: batch transaction lookup does not hide quorum failure', async () => {
+  const p = new CascanMainnetProvider(fakeCascan({
+    _verify: () => { throw new Error('security quorum unavailable'); },
+  }));
+  await assert.rejects(
+    () => p.getRawTransactions(['11'.repeat(32)]),
+    /security quorum unavailable/,
+  );
+});
+
+test('mainnetjs: header lookup uses verified data and validates the payload', async () => {
+  let verified = false;
+  const p = new CascanMainnetProvider(fakeCascan({
+    _verify: () => { verified = true; return '00'.repeat(80); },
+  }));
+  assert.equal((await p.getHeader(1)).hex, '00'.repeat(80));
+  assert.equal(verified, true);
+
+  const hostile = new CascanMainnetProvider(fakeCascan({ _verify: () => '00'.repeat(79) }));
+  await assert.rejects(() => hostile.getHeader(1), /must be 80 bytes/);
 });
 
 test('mainnetjs: sendRawTransaction rejects unverified fire-and-forget mode', async () => {
@@ -171,13 +222,28 @@ test('mainnetjs: default broadcast requires independently verified propagation',
 });
 
 test('mainnetjs: getHistory height-range filter keeps mempool txs (height ≤ 0)', async () => {
+  const a = 'aa'.repeat(32);
+  const b = 'bb'.repeat(32);
+  const mempool = 'cc'.repeat(32);
   const p = new CascanMainnetProvider(fakeCascan({
     'blockchain.address.get_history': () => [
-      { tx_hash: 'a', height: 100 }, { tx_hash: 'b', height: 500 }, { tx_hash: 'm', height: 0 },
+      { tx_hash: a, height: 100 }, { tx_hash: b, height: 500 }, { tx_hash: mempool, height: 0 },
     ],
   }));
   const hist = await p.getHistory('bitcoincash:qq', 400);
-  assert.deepEqual(hist.map(h => h.tx_hash), ['b', 'm'], 'mempool tx survives the from-filter');
+  assert.deepEqual(hist.map(h => h.tx_hash), [b, mempool], 'mempool tx survives the from-filter');
+});
+
+test('mainnetjs: hostile malformed history fails closed', async () => {
+  const p = new CascanMainnetProvider(fakeCascan({
+    'blockchain.address.get_history': () => [{ tx_hash: 'not-a-txid', height: 1 }],
+  }));
+  await assert.rejects(() => p.getHistory('bitcoincash:qq'), /invalid transaction record/);
+
+  const impossibleHeight = new CascanMainnetProvider(fakeCascan({
+    'blockchain.address.get_history': () => [{ tx_hash: '11'.repeat(32), height: -999 }],
+  }));
+  await assert.rejects(() => impossibleHeight.getHistory('bitcoincash:qq'), /invalid transaction record/);
 });
 
 test('mainnetjs: waitForBlock propagates a failed secure height verification', async () => {

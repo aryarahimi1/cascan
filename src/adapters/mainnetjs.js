@@ -19,8 +19,13 @@
  * ElectrumNetworkProvider does not have.
  */
 
-import { broadcastAndVerify, verifyFundingUtxos } from './verification.js';
+import {
+  broadcastAndVerify,
+  independentlyVerifiedRaw,
+  verifyFundingUtxos,
+} from './verification.js';
 import { parseAddress } from '../address.js';
+import { txidFromHex } from '../transaction/raw.js';
 import { isValidBchHeight, parseBchSatoshis } from '../validation.js';
 
 /** mainnet-js Network enum values are 'mainnet' | 'testnet' | 'regtest'. */
@@ -110,7 +115,10 @@ export class CascanMainnetProvider {
   }
 
   async getHeader(height, verbose = false) {
-    const hex = await this.cascan.request('blockchain.block.header', [height]);
+    if (!isValidBchHeight(height)) throw new RangeError('height must be a valid BCH block height');
+    const { value: hex } = await this.cascan.verify('blockchain.block.header', [height]);
+    // Validate even the non-decoded path before exposing hostile server data.
+    decodeHeader(hex, height);
     return verbose ? decodeHeader(hex, height) : { height, hex };
   }
 
@@ -120,7 +128,11 @@ export class CascanMainnetProvider {
 
   /** @returns {Promise<number>} minimum relay fee in BCH/kB (upstream unit) */
   async getRelayFee() {
-    return this.cascan.request('blockchain.relayfee');
+    const { value } = await this.cascan.verify('blockchain.relayfee');
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      throw new Error('server returned an invalid relay fee');
+    }
+    return value;
   }
 
   /**
@@ -130,7 +142,20 @@ export class CascanMainnetProvider {
    *        tokenData from its parent output (requires verbose)
    */
   async getRawTransaction(txHash, verbose = false, loadInputValues = false) {
-    const tx = await this.cascan.request('blockchain.transaction.get', [txHash, Boolean(verbose)]);
+    if (!verbose) return independentlyVerifiedRaw(this.cascan, txHash);
+    if (typeof txHash !== 'string' || !/^[0-9a-f]{64}$/i.test(txHash)) {
+      throw new TypeError('transaction id must be 64 hexadecimal characters');
+    }
+    const normalizedTxid = txHash.toLowerCase();
+    const { value: tx } = await this.cascan.verify(
+      'blockchain.transaction.get',
+      [normalizedTxid, true],
+    );
+    if (tx === null || typeof tx !== 'object' || Array.isArray(tx) ||
+        typeof tx.txid !== 'string' || tx.txid.toLowerCase() !== normalizedTxid ||
+        typeof tx.hex !== 'string' || txidFromHex(tx.hex) !== normalizedTxid) {
+      throw new Error(`verified transaction object does not match requested txid ${normalizedTxid}`);
+    }
     if (!verbose || !loadInputValues) return tx;
 
     // Enrich vins from parent outputs — deduped parent fetches, bounded.
@@ -140,7 +165,7 @@ export class CascanMainnetProvider {
     }
     const ids = [...parents.keys()];
     const fetched = await mapLimit(ids, 8,
-      id => this.cascan.request('blockchain.transaction.get', [id, true]).catch(() => null));
+      id => this.getRawTransaction(id, true, false));
     ids.forEach((id, i) => parents.set(id, fetched[i]));
 
     tx.vin = (tx.vin ?? []).map(vin => {
@@ -160,8 +185,8 @@ export class CascanMainnetProvider {
   async getRawTransactions(hashes) {
     const out = new Map();
     const results = await mapLimit(hashes ?? [], 8,
-      h => this.cascan.request('blockchain.transaction.get', [h, false]).catch(() => null));
-    (hashes ?? []).forEach((h, i) => { if (results[i] != null) out.set(h, results[i]); });
+      h => independentlyVerifiedRaw(this.cascan, h));
+    (hashes ?? []).forEach((h, i) => out.set(h, results[i]));
     return out;
   }
 
@@ -169,8 +194,8 @@ export class CascanMainnetProvider {
   async getHeaders(heights) {
     const out = new Map();
     const results = await mapLimit(heights ?? [], 8,
-      h => this.cascan.request('blockchain.block.header', [h]).catch(() => null));
-    (heights ?? []).forEach((h, i) => { if (results[i] != null) out.set(h, decodeHeader(results[i], h)); });
+      h => this.getHeader(h, true));
+    (heights ?? []).forEach((h, i) => out.set(h, results[i]));
     return out;
   }
 
@@ -191,7 +216,23 @@ export class CascanMainnetProvider {
 
   /** @returns {Promise<Array<{tx_hash: string, height: number, fee?: number}>>} */
   async getHistory(cashaddr, fromHeight, toHeight) {
-    const hist = await this.cascan.request('blockchain.address.get_history', [cashaddr]) ?? [];
+    const { value: response } = await this.cascan.verify(
+      'blockchain.address.get_history',
+      [cashaddr],
+    );
+    if (!Array.isArray(response)) throw new Error('history response must be an array');
+    const hist = response.map((record) => {
+      const validHistoryHeight = record != null && (
+        record.height === 0 || record.height === -1 || isValidBchHeight(record.height)
+      );
+      if (record === null || typeof record !== 'object' ||
+          typeof record.tx_hash !== 'string' || !/^[0-9a-f]{64}$/i.test(record.tx_hash) ||
+          !validHistoryHeight ||
+          (record.fee != null && (!Number.isSafeInteger(record.fee) || record.fee < 0))) {
+        throw new Error('history response contains an invalid transaction record');
+      }
+      return record;
+    });
     return hist.filter(h =>
       (fromHeight == null || h.height >= fromHeight || h.height <= 0) &&
       (toHeight == null || h.height <= toHeight)

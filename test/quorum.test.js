@@ -202,6 +202,51 @@ test('security quorum: one fabricated answer cannot satisfy minAgreement=2', asy
   );
 });
 
+test('security quorum: one liar cannot override two matching responders', async (t) => {
+  const honest = { confirmed: 42, unconfirmed: 0 };
+  const servers = [
+    await startServer(() => ({ confirmed: 5_000_000_000, unconfirmed: 0 })),
+    await startServer(() => honest),
+    await startServer(() => honest),
+  ];
+  t.after(() => closeServers(servers));
+  const qr = await queryQuorum('blockchain.address.get_balance', ['address'], {
+    mode: 'majority',
+    minAgreement: 2,
+    servers: servers.map(server => entry(server)),
+    allowInsecureTransport: true,
+    paymentMode: false,
+    timeoutMs: 100,
+  });
+  assert.deepEqual(qr.value, honest);
+  assert.equal(qr.agreement, 'majority');
+  assert.equal(qr.agreementCount, 2);
+  assert.equal(qr.disagreements.length, 1);
+  assert.equal(qr.partial, true);
+});
+
+test('security boundary: two colluding identities can outvote one honest responder', async (t) => {
+  const fabricated = { confirmed: 5_000_000_000, unconfirmed: 0 };
+  const servers = [
+    await startServer(() => fabricated),
+    await startServer(() => fabricated),
+    await startServer(() => ({ confirmed: 42, unconfirmed: 0 })),
+  ];
+  t.after(() => closeServers(servers));
+  const qr = await queryQuorum('blockchain.address.get_balance', ['address'], {
+    mode: 'majority',
+    minAgreement: 2,
+    servers: servers.map(server => entry(server)),
+    allowInsecureTransport: true,
+    paymentMode: false,
+    timeoutMs: 100,
+  });
+  assert.deepEqual(qr.value, fabricated);
+  assert.equal(qr.agreement, 'majority');
+  assert.equal(qr.agreementCount, 2);
+  assert.equal(qr.disagreements.length, 1);
+});
+
 test('security quorum: two matching independent endpoints satisfy minAgreement=2', async (t) => {
   const servers = [
     await startServer(() => ({ confirmed: 42 })),

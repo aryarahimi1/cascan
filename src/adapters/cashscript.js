@@ -35,7 +35,11 @@
 
 import { parseAddress, scriptToScripthash } from '../address.js';
 import { txidFromHex } from '../transaction/raw.js';
-import { broadcastAndVerify, verifyFundingUtxos } from './verification.js';
+import {
+  broadcastAndVerify,
+  independentlyVerifiedRaw,
+  verifyFundingUtxos,
+} from './verification.js';
 
 export { txidFromHex };
 
@@ -145,7 +149,7 @@ export class CascanNetworkProvider {
    * @returns {Promise<string>} raw transaction hex
    */
   async getRawTransaction(txid) {
-    return this.cascan.request('blockchain.transaction.get', [txid, false]);
+    return independentlyVerifiedRaw(this.cascan, txid);
   }
 
   /**

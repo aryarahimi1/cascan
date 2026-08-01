@@ -202,7 +202,8 @@ Implements the documented `NetworkProvider` interface by shape: `getUtxos`,
 details, documented `NetworkProvider*Error` names on broadcast failures.
 Signing candidates are matched against quorum-agreed raw funding outputs,
 and broadcast success requires two matching servers to retrieve the exact
-raw transaction.
+raw transaction. `getRawTransaction()` is also quorum-verified and hashes the
+returned bytes back to the requested txid.
 
 ### mainnet-js
 
@@ -217,6 +218,9 @@ vin enrichment, `getHistory` ranges, `waitForBlock`, and address/transaction
 subscriptions that ride the pool's resurrection guarantees. UTXO selection
 and default broadcast use the same strict funding-output and propagation
 verification as the CashScript adapter.
+Transactions, parent enrichment, headers, history, relay fee, and balance use
+strict quorum; malformed, missing, or disagreeing batch members reject rather
+than being silently omitted.
 The unsafe mainnet-js `awaitPropagation=false` fire-and-forget mode is
 rejected rather than returning an unverifiable success.
 

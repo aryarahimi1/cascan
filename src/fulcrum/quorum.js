@@ -208,6 +208,8 @@ async function callOne(serverEntry, method, params, opts) {
  *           network?: 'mainnet'|'chipnet'|'testnet4', timeoutMs?: number,
  *           minAgreement?: number, allowInsecureTransport?: boolean,
  *           paymentMode?: boolean }} [opts]
+ * `paymentMode: false` is an explicit non-security mode: matching endpoints
+ * are not evidence of independent ownership, even when minAgreement > 1.
  * @returns {Promise<{
  *   value: any,
  *   answered: string,           // server whose value was returned

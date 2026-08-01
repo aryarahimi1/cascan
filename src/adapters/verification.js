@@ -24,17 +24,21 @@ function sameToken(reported, actual) {
   return true;
 }
 
-async function independentlyVerifiedRaw(cascan, txid) {
+export async function independentlyVerifiedRaw(cascan, txid) {
   if (typeof cascan?.verify !== 'function') {
     throw new Error('connected cascan instance does not support quorum verification');
   }
+  if (typeof txid !== 'string' || !/^[0-9a-f]{64}$/i.test(txid)) {
+    throw new TypeError('transaction id must be 64 hexadecimal characters');
+  }
+  const normalizedTxid = txid.toLowerCase();
   const { value } = await cascan.verify(
     'blockchain.transaction.get',
-    [txid, false],
+    [normalizedTxid, false],
     { mode: 'majority', minAgreement: 2 }
   );
-  if (typeof value !== 'string' || txidFromHex(value) !== txid.toLowerCase()) {
-    throw new Error(`verified raw transaction does not match requested txid ${txid}`);
+  if (typeof value !== 'string' || txidFromHex(value) !== normalizedTxid) {
+    throw new Error(`verified raw transaction does not match requested txid ${normalizedTxid}`);
   }
   return value;
 }

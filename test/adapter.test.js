@@ -125,6 +125,24 @@ test('provider: constructor rejects a non-connected argument', () => {
   assert.throws(() => new CascanNetworkProvider({}), /connected cascan instance/);
 });
 
+test('provider: raw transaction retrieval requires quorum and binds bytes to txid', async () => {
+  const raw = rawTransaction([{ value: 1n, lockingBytecode: Buffer.from('51', 'hex') }]);
+  const txid = txidFromHex(raw);
+  let verified = false;
+  const cascan = fakeCascan({
+    _verify: () => { verified = true; return raw; },
+  });
+  const p = new CascanNetworkProvider(cascan);
+
+  assert.equal(await p.getRawTransaction(txid.toUpperCase()), raw);
+  assert.equal(verified, true);
+  await assert.rejects(
+    () => new CascanNetworkProvider(fakeCascan({ _verify: () => '00' })).getRawTransaction(txid),
+    /does not match requested txid/,
+  );
+  await assert.rejects(() => p.getRawTransaction('not-a-txid'), /64 hexadecimal/);
+});
+
 // ---------------------------------------------------------------------------
 // Broadcast semantics
 // ---------------------------------------------------------------------------

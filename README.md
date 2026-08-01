@@ -164,7 +164,9 @@ const provider = new CascanMainnetProvider(await connect());
 Full interface by shape — headers, batches, `loadInputValues` vin
 enrichment, `waitForBlock`, and address/tx subscriptions that inherit the
 pool's failover + resurrection guarantees (which the stock single-client
-provider does not have).
+provider does not have). Transactions, parent enrichment, headers, history,
+relay fee, and balance are quorum-checked; malformed or disagreeing results
+fail closed.
 
 Implements the full standardized interface (`getUtxos`,
 `getUtxosForLockingBytecode`, `getBlockHeight`, `getRawTransaction`,
@@ -173,7 +175,9 @@ the documented `NetworkProvider*Error` names on broadcast failures. Signing
 candidates are checked against quorum-agreed raw funding transactions, so a
 server cannot hide a CashToken prefix and induce a token burn. Broadcast
 success — including "already in mempool" — is returned only after two
-matching servers can retrieve the exact transaction. See
+matching servers can retrieve the exact transaction. Raw transaction reads
+also require strict quorum and hash the returned bytes back to the requested
+txid. See
 `examples/cashscript-provider.mjs`.
 
 ### See the failover with your own eyes
@@ -319,7 +323,9 @@ not a public issue.
   treated only as untrusted change signals.
 - **Signing and broadcast:** adapter UTXOs are checked against quorum-agreed
   raw funding outputs (including CashToken prefixes), and broadcast success
-  requires independent retrieval of the exact raw transaction.
+  requires independent retrieval of the exact raw transaction. Adapter
+  transaction, header, history, and parent-enrichment reads also fail closed
+  on malformed data or quorum disagreement.
 - **Money math:** satoshis and token amounts are BigInt/string end-to-end;
   floats only appear in display-only USD conversion.
 - **TLS:** automatic Node discovery and all payment-capable defaults require

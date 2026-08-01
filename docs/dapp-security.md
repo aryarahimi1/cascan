@@ -29,6 +29,12 @@ Do not use `request()` or `{ verify: false }` to authorize a withdrawal,
 token-gated action, exchange credit, payment fulfillment, or confirmation
 threshold. Those are explicit single-server modes.
 
+The exported low-level `queryQuorum()` also has an explicit
+`paymentMode: false` option for diagnostics and tests. Even if several such
+endpoints match, that mode does not check operator/infrastructure independence
+and is not a security quorum. Financial integrations should use `verify()` or
+the verified high-level methods instead.
+
 Address subscription callbacks are validated status-change signals, not
 payment proofs. On a callback, refetch the relevant state through the default
 verified API before taking a money-moving action.
@@ -113,6 +119,14 @@ transaction through strict quorum and verify that each output's value,
 CashToken prefix, and locking bytecode match the requested address. A server
 cannot substitute a genuine foreign UTXO as the caller's funds.
 
+CashScript raw-transaction retrieval requires strict quorum and hashes the
+returned bytes back to the requested txid. The mainnet-js provider also uses
+strict quorum for raw/verbose transactions, parent-input enrichment, headers,
+history, relay fee, and balance. Malformed ids, transaction objects, histories,
+headers, fees, and hash mismatches reject rather than reaching the dapp.
+Batch lookups reject on a failed member instead of silently converting a
+quorum failure into a missing result.
+
 Broadcast success requires two endpoints to retrieve the exact raw
 transaction. This proves propagation visibility, not confirmation or block
 inclusion.
@@ -155,6 +169,10 @@ hard ceilings are listed in [the browser API reference](library.md#browser-api).
   cryptographic identities. Same-IP/certificate collapse catches obvious
   aliases, but cascan has no reliable global ownership or ASN oracle. Two
   apparently separate operators may still share hidden control or collude.
+- Two matching, genuinely independent-but-colluding operators can satisfy the
+  default two-voter policy and outvote one honest operator. Increase the
+  independently researched voter set for higher-value decisions, and do not
+  describe quorum as trustless consensus.
 - cascan does not implement transaction-inclusion Merkle proofs or SPV.
   Confirmed-status claims remain quorum-checked endpoint claims.
 - A malicious server can omit a real UTXO or report a stale/spent UTXO.
