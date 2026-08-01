@@ -7,7 +7,7 @@
  * every observation:
  *
  *   latencyEmaMs  — exponential moving average of request latency
- *   failures      — consecutive failure count (reset on success)
+ *   failures      — failure debt (cleared only after minimum healthy uptime)
  *   lastOkAt      — ms epoch of last successful call (0 = never)
  *   lastFailAt    — ms epoch of last failure (0 = never)
  *   height        — last reported chain tip (null = unknown)
@@ -30,6 +30,7 @@
  */
 
 import { isValidBchHeight } from '../validation.js';
+import { equalJitterDelay } from './recovery.js';
 
 const LATENCY_DIVISOR = 50;
 const FAILURE_PENALTY = 25;
@@ -43,28 +44,62 @@ const EMA_ALPHA = 0.3;
 
 /** Fresh health record for a never-probed server. */
 export function newHealth() {
-  return { latencyEmaMs: null, failures: 0, lastOkAt: 0, lastFailAt: 0, height: null, heightAt: 0 };
+  return {
+    latencyEmaMs: null,
+    failures: 0,
+    lastOkAt: 0,
+    lastFailAt: 0,
+    height: null,
+    heightAt: 0,
+    cooldownUntil: 0,
+  };
 }
 
-/** Record a successful call. Mutates and returns the health record. */
-export function recordSuccess(health, latencyMs, height = null) {
+/** Backfill and constrain serialized/legacy health records. */
+export function normalizeHealth(value, opts = {}) {
+  const input = value && typeof value === 'object' ? value : {};
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const maxCooldownMs = Number.isFinite(opts.maxCooldownMs) && opts.maxCooldownMs >= 0
+    ? opts.maxCooldownMs
+    : 60_000;
+  return {
+    latencyEmaMs: Number.isFinite(input.latencyEmaMs) && input.latencyEmaMs >= 0
+      ? input.latencyEmaMs
+      : null,
+    failures: Number.isInteger(input.failures) && input.failures >= 0
+      ? Math.min(input.failures, 1_000_000)
+      : 0,
+    lastOkAt: finiteTimestamp(input.lastOkAt, now),
+    lastFailAt: finiteTimestamp(input.lastFailAt, now),
+    height: isValidBchHeight(input.height) ? input.height : null,
+    heightAt: finiteTimestamp(input.heightAt, now),
+    cooldownUntil: finiteTimestamp(input.cooldownUntil, now + maxCooldownMs),
+  };
+}
+
+/** Record a successful call. Pool callers explicitly decide when uptime is stable enough to clear debt. */
+export function recordSuccess(health, latencyMs, height = null, opts = {}) {
+  const now = opts.now ?? Date.now();
   health.latencyEmaMs = health.latencyEmaMs === null
     ? latencyMs
     : Math.round(EMA_ALPHA * latencyMs + (1 - EMA_ALPHA) * health.latencyEmaMs);
-  health.failures = 0;
-  health.lastOkAt = Date.now();
+  if (opts.clearFailures !== false) {
+    health.failures = 0;
+    health.cooldownUntil = 0;
+  }
+  health.lastOkAt = now;
   if (isValidBchHeight(height)) {
     health.height = height;
-    health.heightAt = Date.now();
+    health.heightAt = now;
   }
   return health;
 }
 
 /** Record a height observation without a latency sample (notifications). */
-export function recordHeight(health, height) {
+export function recordHeight(health, height, now = Date.now()) {
   if (isValidBchHeight(height)) {
     health.height = height;
-    health.heightAt = Date.now();
+    health.heightAt = now;
   }
   return health;
 }
@@ -77,10 +112,24 @@ function freshHeight(h, now) {
 }
 
 /** Record a failed call. Mutates and returns the health record. */
-export function recordFailure(health) {
-  health.failures += 1;
-  health.lastFailAt = Date.now();
+export function recordFailure(health, opts = {}) {
+  const now = opts.now ?? Date.now();
+  health.failures = Math.min(1_000_000, (Number.isInteger(health.failures) ? health.failures : 0) + 1);
+  health.lastFailAt = now;
+  if (opts.failureBackoffBaseMs && opts.failureBackoffMaxMs) {
+    const delay = equalJitterDelay(
+      health.failures,
+      opts.failureBackoffBaseMs,
+      opts.failureBackoffMaxMs,
+      opts.random,
+    );
+    health.cooldownUntil = Math.max(health.cooldownUntil ?? 0, now + delay);
+  }
   return health;
+}
+
+export function isServerCoolingDown(server, now = Date.now()) {
+  return Number.isFinite(server?.health?.cooldownUntil) && server.health.cooldownUntil > now;
 }
 
 /**
@@ -143,7 +192,12 @@ export function consensusHeight(servers, now = Date.now()) {
  */
 export function rankServers(servers, now = Date.now()) {
   const maxHeight = consensusHeight(servers, now);
-  return [...servers].sort((a, b) => scoreServer(b, maxHeight, now) - scoreServer(a, maxHeight, now));
+  return [...servers].sort((a, b) => {
+    const coolingA = isServerCoolingDown(a, now);
+    const coolingB = isServerCoolingDown(b, now);
+    if (coolingA !== coolingB) return coolingA ? 1 : -1;
+    return scoreServer(b, maxHeight, now) - scoreServer(a, maxHeight, now);
+  });
 }
 
 /** Expose the scoring constants for display/tests (read-only contract). */
@@ -151,3 +205,7 @@ export const SCORING = Object.freeze({
   LATENCY_DIVISOR, FAILURE_PENALTY, LAG_PENALTY, LAG_CAP,
   RECENT_FAIL_PENALTY, RECENT_FAIL_WINDOW_MS, HEIGHT_FRESH_MS, TLS_BONUS, EMA_ALPHA,
 });
+
+function finiteTimestamp(value, max) {
+  return Number.isFinite(value) && value >= 0 && value <= max ? Math.floor(value) : 0;
+}

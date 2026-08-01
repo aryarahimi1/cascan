@@ -34,6 +34,13 @@ resolves connected — or throws
 | `handlerRetryBaseMs` | `500` | initial callback retry delay after throw/rejection/timeout |
 | `handlerRetryMaxMs` | `30000` | maximum callback retry delay |
 | `handlerTimeoutMs` | `30000` | time before a callback attempt is treated as failed; timeout cannot cancel user code |
+| `failureBackoffBaseMs` | `1000` | initial per-server circuit cooldown; equal jitter chooses the upper half of each exponential range |
+| `failureBackoffMaxMs` | `60000` | maximum per-server circuit cooldown |
+| `minHealthyUptimeMs` | `60000` | successful setup does not erase failure debt; a live server must remain healthy this long and then answer successfully |
+| `retryBudgetAttempts` | `min(32, max(4, pool size))` | global connection attempts allowed per budget window (1–64), shared by every caller and recovery path |
+| `retryBudgetWindowMs` | `60000` | fixed connection-attempt budget window |
+| `recoveryBackoffBaseMs` | `1000` | initial whole-pool background recovery backoff after an active pool is exhausted |
+| `recoveryBackoffMaxMs` | `60000` | maximum whole-pool recovery backoff; only one recovery timer exists |
 | `cachePath` | `~/.cascan/servers*.json` | discovery cache location |
 | `onLog` | silent | discovery progress callback |
 
@@ -53,7 +60,9 @@ resolves connected — or throws
 
 Events (via `bch.on(...)`): `failover` `{from, to, reason}` ·
 `failover-start` · `server-lost` `{server, error}` · `exhausted` `{errors}` ·
-`handler-error` `{eventId, type, key, source, observedAt, attempt, error, willRetry}`.
+`handler-error` `{eventId, type, key, source, observedAt, attempt, error, willRetry}` ·
+`recovery-scheduled` `{attempt, delayMs, retryAt}` ·
+`recovered` `{server, outageMs}` · `server-stable` `{server, uptimeMs}`.
 
 ### Subscription delivery contract
 
@@ -88,7 +97,9 @@ assertions—not proof against hidden common ownership or collusion.
 
 `connect({ network?, servers?, timeoutMs?, keepaliveMs?, subscriptionCheckMs?,
 subscriptionCheckBatchSize?, handlerRetryBaseMs?, handlerRetryMaxMs?,
-handlerTimeoutMs? })` automatically uses
+handlerTimeoutMs?, failureBackoffBaseMs?, failureBackoffMaxMs?,
+minHealthyUptimeMs?, retryBudgetAttempts?, retryBudgetWindowMs?,
+recoveryBackoffBaseMs?, recoveryBackoffMaxMs? })` automatically uses
 the selected network's built-in `wss://` bootstrap pool. It verifies each
 candidate against BCH fork checkpoints using Web Crypto, then connects to the
 best healthy endpoint. Passing `servers` overrides the bootstrap pool.
@@ -111,7 +122,7 @@ The returned `BrowserCascan` provides:
 | `request(method, params)` | raw Electrum call with failover |
 | `servers()` | current health-ranked WSS pool |
 | `killCurrent(reason?)` | demo/test hook for real failover |
-| `on` / `off` | `failover`, `failover-start`, `server-lost`, `exhausted`, `block`, `handler-error` |
+| `on` / `off` | pool lifecycle, recovery, `block`, and `handler-error` events listed above |
 | `close()` | closes the pool and clears subscriptions |
 
 Browser security defaults: `wss://` only, certificate validation delegated to
@@ -133,8 +144,17 @@ and the residual trust limits.
   the replacement and the latest observed gap state is delivered through the
   acknowledged callback path (status hashes compared).
 - Application errors (`tx not found`) are answers, not failover triggers.
-- Whole pool unreachable → `AllServersFailedError` + `exhausted` event.
-  Loud death, never silent staleness.
+- Whole pool unreachable → the current operation rejects with
+  `AllServersFailedError` and emits `exhausted`. An already-active library pool
+  schedules one bounded background recovery loop and emits `recovered` after
+  subscriptions have been restored. An initial failed `connect()` schedules
+  nothing because no caller can own or close that pool.
+- Failed endpoints open exponential equal-jitter circuits. One successful
+  setup cannot erase their failure debt; 60 seconds of healthy uptime plus a
+  successful request/ping is required. A fixed-window global dial budget caps
+  all callers and automatic recovery together.
+- `close()` cancels pending recovery and wins a race with in-flight setup, so
+  a closed pool cannot silently reconnect.
 - `pool.killCurrent(reason?)` — chaos hook: kill the live connection for
   real and watch your own failover handling run.
 

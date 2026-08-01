@@ -65,7 +65,12 @@ Read the [dapp security contract](docs/dapp-security.md) before using cascan
 to authorize money movement, token access, or confirmations.
 
 When the entire pool is unreachable you get `AllServersFailedError` —
-loud death, never silent staleness.
+loud failure for the current request, never silent staleness. A pool that was
+previously connected keeps exactly one bounded background recovery attempt:
+failed endpoints enter exponential equal-jitter cooldowns, all connection
+attempts share a global budget, and failure debt clears only after 60 seconds
+of healthy uptime. `recovery-scheduled` and `recovered` make the outage visible.
+An initial `connect()` failure does not leave an inaccessible background task.
 
 `watch()` callbacks may be synchronous or async. A throw, rejected promise,
 or 30-second timeout emits `handler-error` and retries with bounded backoff

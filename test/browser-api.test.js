@@ -108,6 +108,14 @@ test('browser API: rejects insecure, credential-bearing, and empty explicit serv
     }),
     /retryMaxMs must be greater than or equal to retryBaseMs/,
   );
+  await assert.rejects(
+    () => connect({
+      servers: ['wss://never-dial.example/'],
+      recoveryBackoffBaseMs: 100,
+      recoveryBackoffMaxMs: 10,
+    }),
+    /recoveryBackoffMaxMs must be greater than or equal to recoveryBackoffBaseMs/,
+  );
   assert.throws(
     () => normalizeBrowserServers([`wss://one.example/${'x'.repeat(2_100)}`]),
     /at most/,

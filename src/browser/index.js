@@ -99,12 +99,17 @@ export class BrowserCascan {
   servers() {
     const ranked = this.pool.ranked();
     const maxHeight = consensusHeight(ranked);
+    const now = Date.now();
     return ranked.map(server => ({
       url: server.url,
       connected: this.pool.current === server.url,
       height: server.health.height,
       latencyMs: server.health.latencyEmaMs,
       failures: server.health.failures,
+      cooldownUntil: server.health.cooldownUntil > now
+        ? new Date(server.health.cooldownUntil).toISOString()
+        : null,
+      cooldownMs: Math.max(0, (server.health.cooldownUntil ?? 0) - now),
       score: Math.round(scoreServer(server, maxHeight) * 10) / 10,
     }));
   }
@@ -138,6 +143,13 @@ export async function connect(opts = {}) {
     handlerRetryBaseMs: opts.handlerRetryBaseMs,
     handlerRetryMaxMs: opts.handlerRetryMaxMs,
     handlerTimeoutMs: opts.handlerTimeoutMs,
+    failureBackoffBaseMs: opts.failureBackoffBaseMs,
+    failureBackoffMaxMs: opts.failureBackoffMaxMs,
+    minHealthyUptimeMs: opts.minHealthyUptimeMs,
+    retryBudgetAttempts: opts.retryBudgetAttempts,
+    retryBudgetWindowMs: opts.retryBudgetWindowMs,
+    recoveryBackoffBaseMs: opts.recoveryBackoffBaseMs,
+    recoveryBackoffMaxMs: opts.recoveryBackoffMaxMs,
   });
   const cascan = new BrowserCascan(pool, { network: network.name });
   await pool.acquire();

@@ -48,6 +48,17 @@ a notification channel that went silent while ping remained healthy. These
 properties recover state-change triggers; they do not create an append-only
 transaction feed.
 
+Failover is serialized: concurrent request, socket, keepalive, and liveness
+failures share one teardown/reconnect transition. Failed endpoints enter
+exponential equal-jitter circuit cooldowns, and one setup success does not
+clear failure debt. All callers and background recovery share a fixed-window
+connection-attempt budget. After an active pool is exhausted, the current
+operation still fails closed, while exactly one bounded recovery timer keeps
+subscription recovery possible. Monitor `exhausted`, `recovery-scheduled`,
+and `recovered`; do not interpret recovery as verification of server data.
+Calling `close()` cancels pending recovery and prevents an in-flight setup
+from reactivating the pool.
+
 Automatic Node discovery treats DNS seed, gossip, and cached endpoints as
 untrusted. It rejects private, loopback, link-local, metadata, multicast,
 documentation, benchmarking, and reserved destinations; rejects mixed
@@ -148,6 +159,10 @@ server's claim into independent verification.
 - At-least-once delivery permits duplicates, and backpressure coalesces
   intermediate unstarted statuses. Handlers must be idempotent and must query
   the state they need instead of treating callbacks as a complete ledger.
+- Circuit breakers and retry budgets bound reconnect amplification; they also
+  intentionally trade temporary availability for process and network safety.
+  A pool with too few healthy endpoints may remain unavailable until a
+  cooldown or budget window opens.
 
 ## Integration checklist
 
@@ -160,4 +175,6 @@ server's claim into independent verification.
    not a durable queue.
 6. Handle `QuorumDisagreementError` and `AllServersFailedError` as a
    fail-closed state; never substitute a cached or single-server answer.
-7. Disclose Electrum query/IP privacy to browser users.
+7. Alert on repeated `exhausted`/`recovery-scheduled` events and test a full
+   network outage plus automatic subscription restoration in staging.
+8. Disclose Electrum query/IP privacy to browser users.

@@ -24,7 +24,14 @@ import { EventEmitter } from 'node:events';
 import { FulcrumClient } from '../fulcrum/client.js';
 import { verifyBchChain } from '../fulcrum/chain.js';
 import { AllServersFailedError, isTransportFailure } from '../fulcrum/errors.js';
-import { newHealth, recordSuccess, recordFailure, recordHeight, rankServers } from './health.js';
+import {
+  isServerCoolingDown,
+  normalizeHealth,
+  recordSuccess,
+  recordFailure,
+  recordHeight,
+  rankServers,
+} from './health.js';
 import { requireAllowedTransport, serverName } from './transport.js';
 import { isValidBchHeight, isValidElectrumAddressStatus } from '../validation.js';
 import { getNetwork } from '../networks.js';
@@ -33,6 +40,7 @@ import {
   MAX_SUBSCRIPTION_TIMER_MS,
   normalizeSubscriptionDeliveryOptions,
 } from '../subscriptions/delivery.js';
+import { normalizeRecoveryOptions, RetryController } from './recovery.js';
 
 const KEEPALIVE_MS = 45_000;
 const SUBSCRIPTION_CHECK_MS = 30_000;
@@ -47,14 +55,28 @@ export class ServerPool extends EventEmitter {
    *           subscriptionCheckMs?: number, subscriptionCheckBatchSize?: number,
    *           handlerRetryBaseMs?: number, handlerRetryMaxMs?: number,
    *           handlerTimeoutMs?: number,
+   *           failureBackoffBaseMs?: number, failureBackoffMaxMs?: number,
+   *           minHealthyUptimeMs?: number,
+   *           retryBudgetAttempts?: number, retryBudgetWindowMs?: number,
+   *           recoveryBackoffBaseMs?: number, recoveryBackoffMaxMs?: number,
    *           allowInsecureTransport?: boolean,
-   *           clientFactory?: (server: object) => object }} [opts]
+   *           clientFactory?: (server: object) => object,
+   *           now?: () => number, random?: () => number }} [opts]
    */
   constructor(servers, opts = {}) {
     super();
+    this._now = typeof opts.now === 'function' ? opts.now : Date.now;
+    this._random = typeof opts.random === 'function' ? opts.random : Math.random;
+    this._setTimeout = typeof opts.setTimeout === 'function' ? opts.setTimeout : setTimeout;
+    this._clearTimeout = typeof opts.clearTimeout === 'function' ? opts.clearTimeout : clearTimeout;
+    this._recoveryPolicy = normalizeRecoveryOptions(opts, servers.length);
+    const healthNow = this._now();
     this.servers = servers.map(s => ({
       ...s,
-      health: s.health ?? newHealth(),
+      health: normalizeHealth(s.health, {
+        now: healthNow,
+        maxCooldownMs: this._recoveryPolicy.failureBackoffMaxMs,
+      }),
       tlsStrict: s.tlsStrict ?? true, // curated entries are hostname+valid-cert
     }));
     this.network = getNetwork(opts.network ?? servers[0]?.network ?? 'mainnet').name;
@@ -74,6 +96,7 @@ export class ServerPool extends EventEmitter {
       retryMaxMs: opts.handlerRetryMaxMs,
       handlerTimeoutMs: opts.handlerTimeoutMs,
     });
+    this._retryController = new RetryController(this._recoveryPolicy, { random: this._random });
     this._clientFactory = opts.clientFactory ?? ((server) => {
       const target = requireAllowedTransport(server, {
         allowInsecureTransport: this.allowInsecureTransport,
@@ -91,6 +114,13 @@ export class ServerPool extends EventEmitter {
     this._client = null;
     this._current = null;       // server record backing _client
     this._connecting = null;    // in-flight connect promise (serializes failover)
+    this._failingOver = null;   // one teardown/reconnect transition at a time
+    this._activeSince = null;
+    this._activeStable = false;
+    this._everConnected = false;
+    this._exhaustedSince = null;
+    this._recoveryTimer = null;
+    this._recoveryScheduledAt = 0;
     this._subs = new Map();     // address → observed + acknowledged delivery state
     this._txSubs = new Map();   // txid → observed + acknowledged delivery state
     this._keepalive = null;
@@ -112,7 +142,35 @@ export class ServerPool extends EventEmitter {
 
   /** Health-ranked snapshot (does not mutate pool order). */
   ranked() {
-    return rankServers(this.servers);
+    return rankServers(this.servers, this._now());
+  }
+
+  _recordServerFailure(server) {
+    if (!server) return;
+    recordFailure(server.health, {
+      now: this._now(),
+      random: this._random,
+      failureBackoffBaseMs: this._recoveryPolicy.failureBackoffBaseMs,
+      failureBackoffMaxMs: this._recoveryPolicy.failureBackoffMaxMs,
+    });
+  }
+
+  _recordSetupSuccess(server, latencyMs, height = null) {
+    const now = this._now();
+    recordSuccess(server.health, latencyMs, height, { now, clearFailures: false });
+  }
+
+  _recordActiveSuccess(server, latencyMs, height = null) {
+    const now = this._now();
+    const stable = server === this._current
+      && this._activeSince !== null
+      && (now - this._activeSince) >= this._recoveryPolicy.minHealthyUptimeMs;
+    recordSuccess(server.health, latencyMs, height, { now, clearFailures: stable });
+    if (stable && !this._activeStable) {
+      this._activeStable = true;
+      this._retryController.noteStable(now);
+      this.emit('server-stable', { server: this.current, uptimeMs: now - this._activeSince });
+    }
   }
 
   /**
@@ -132,12 +190,22 @@ export class ServerPool extends EventEmitter {
   async _connect(exclude = new Set()) {
     const previous = this.current;
     const errors = [];
+    let budgetExhausted = false;
+    let eligibleServers = 0;
 
     for (const server of this.ranked()) {
+      if (this._closed) throw new Error('pool closed');
       if (exclude.has(serverName(server))) continue;
+      const attemptAt = this._now();
+      if (isServerCoolingDown(server, attemptAt)) continue;
+      eligibleServers++;
+      if (!this._retryController.take(attemptAt)) {
+        budgetExhausted = true;
+        break;
+      }
       let client;
       let activated = false;
-      const t0 = Date.now();
+      const t0 = this._now();
       try {
         // Enforce the transport policy before even a custom factory can dial.
         requireAllowedTransport(server, {
@@ -145,6 +213,7 @@ export class ServerPool extends EventEmitter {
         });
         client = this._clientFactory(server);
         await client.connect();
+        if (this._closed) throw new Error('pool closed');
         let closedDuringSetup = false;
         const c = client;
         c._socket?.once('close', () => {
@@ -165,16 +234,16 @@ export class ServerPool extends EventEmitter {
         // not optional: a socket that died after its proof must never become
         // the active client.
         const tip = await client.request('blockchain.headers.subscribe');
-        if (closedDuringSetup || !client.connected) {
+        if (this._closed || closedDuringSetup || !client.connected) {
           const err = new Error('connection closed during verified pool setup');
           err.kind = 'transport';
           throw err;
         }
 
-        recordSuccess(server.health, Date.now() - t0);
+        this._recordSetupSuccess(server, this._now() - t0);
         this._client = client;
         this._current = server;
-        if (tip?.height != null) recordHeight(server.health, tip.height);
+        if (tip?.height != null) recordHeight(server.health, tip.height, this._now());
 
         this._restoring = true;
         this._stagedAddressStatuses.clear();
@@ -183,7 +252,7 @@ export class ServerPool extends EventEmitter {
         try {
           const restored = await this._resubscribeAll();
           if (this._restoreError) throw this._restoreError;
-          if (closedDuringSetup || !client.connected) {
+          if (this._closed || closedDuringSetup || !client.connected) {
             const err = new Error('connection closed during verified pool setup');
             err.kind = 'transport';
             throw err;
@@ -196,16 +265,32 @@ export class ServerPool extends EventEmitter {
           this._restoreError = null;
         }
         activated = true;
+        this._activeSince = this._now();
+        this._activeStable = false;
+        this._everConnected = true;
+        this._cancelRecovery();
         this._startKeepalive();
         this._startSubscriptionChecks();
+
+        if (this._exhaustedSince !== null) {
+          const exhaustedSince = this._exhaustedSince;
+          this._exhaustedSince = null;
+          this.emit('recovered', {
+            server: this.current,
+            outageMs: Math.max(0, this._now() - exhaustedSince),
+          });
+        }
 
         if (previous && previous !== this.current) {
           this.emit('failover', { from: previous, to: this.current, reason: 'reconnect' });
         }
         return client;
       } catch (err) {
-        recordFailure(server.health);
-        errors.push(err);
+        const closing = this._closed;
+        if (!closing) {
+          this._recordServerFailure(server);
+          errors.push(err);
+        }
         if (this._client === client) {
           this._stopKeepalive();
           this._stopSubscriptionChecks();
@@ -213,19 +298,41 @@ export class ServerPool extends EventEmitter {
           this._current = null;
         }
         client?.close();
+        if (closing) throw new Error('pool closed');
         this.emit('server-lost', { server: `${server.host}`, error: err.message });
       }
     }
 
+    if (budgetExhausted) errors.push(new Error('global Fulcrum connection retry budget exhausted'));
+    if (eligibleServers === 0 && errors.length === 0) {
+      errors.push(new Error('all eligible Fulcrum server circuits are cooling down'));
+    }
+
     const exhausted = new AllServersFailedError(errors);
-    this.emit('exhausted', { errors: errors.map(e => e.message) });
+    if (this._everConnected && this._exhaustedSince === null) this._exhaustedSince = this._now();
+    const recovery = this._scheduleRecovery();
+    if (recovery) {
+      exhausted.retryAt = recovery.retryAt;
+      exhausted.retryAfterMs = recovery.delayMs;
+    }
+    this.emit('exhausted', {
+      errors: errors.map(e => e.message),
+      ...(recovery ? { recovery } : {}),
+    });
     throw exhausted;
   }
 
   async _failover(reason, opts = {}) {
     if (this._closed) return;
+    if (this._failingOver) return this._failingOver;
+    this._failingOver = this._performFailover(reason, opts)
+      .finally(() => { this._failingOver = null; });
+    return this._failingOver;
+  }
+
+  async _performFailover(reason, opts = {}) {
     const from = this.current;
-    if (this._current) recordFailure(this._current.health);
+    if (this._current) this._recordServerFailure(this._current);
     this._teardownClient();
     this.emit('failover-start', { from, reason });
     await this.acquire({ exclude: opts.exclude ?? new Set() });
@@ -235,6 +342,8 @@ export class ServerPool extends EventEmitter {
   _teardownClient() {
     this._stopKeepalive();
     this._stopSubscriptionChecks();
+    this._activeSince = null;
+    this._activeStable = false;
     if (this._client) {
       const c = this._client;
       this._client = null;
@@ -256,10 +365,10 @@ export class ServerPool extends EventEmitter {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const client = await this.acquire(); // throws AllServersFailedError when exhausted
       const server = this._current;
-      const t0 = Date.now();
+      const t0 = this._now();
       try {
         const value = await client.request(method, params);
-        recordSuccess(server.health, Date.now() - t0);
+        this._recordActiveSuccess(server, this._now() - t0);
         return value;
       } catch (err) {
         lastErr = err;
@@ -612,7 +721,7 @@ export class ServerPool extends EventEmitter {
     } else if (method === 'blockchain.headers.subscribe') {
       const tip = Array.isArray(params) ? params[0] : params;
       if (isValidBchHeight(tip?.height) && this._current) {
-        recordHeight(this._current.health, tip.height);
+        recordHeight(this._current.health, tip.height, this._now());
         this.emit('block', { height: tip.height, hex: tip.hex ?? null });
       }
     }
@@ -688,15 +797,61 @@ export class ServerPool extends EventEmitter {
     this._subscriptionCheckInFlight = false;
   }
 
+  _earliestCircuitAt(now) {
+    let earliest = Infinity;
+    for (const server of this.servers) {
+      const until = Number.isFinite(server.health.cooldownUntil)
+        ? server.health.cooldownUntil
+        : now;
+      earliest = Math.min(earliest, Math.max(now, until));
+    }
+    return Number.isFinite(earliest) ? earliest : now;
+  }
+
+  _scheduleRecovery() {
+    if (this._closed || !this._everConnected) return null;
+    if (this._recoveryTimer !== null) {
+      return {
+        attempt: this._retryController.recoveryFailures,
+        delayMs: Math.max(1, this._recoveryScheduledAt - this._now()),
+        retryAt: this._recoveryScheduledAt,
+      };
+    }
+
+    const now = this._now();
+    const recovery = this._retryController.noteExhaustion(now, this._earliestCircuitAt(now));
+    this._recoveryScheduledAt = recovery.retryAt;
+    this._recoveryTimer = this._setTimeout(() => {
+      this._recoveryTimer = null;
+      this._recoveryScheduledAt = 0;
+      if (this._closed || this._client?.connected) return;
+      this.acquire().catch(() => { /* _connect emits exhaustion and schedules the next bounded attempt */ });
+    }, recovery.delayMs);
+    this._recoveryTimer.unref?.();
+    this.emit('recovery-scheduled', recovery);
+    return recovery;
+  }
+
+  _cancelRecovery() {
+    if (this._recoveryTimer !== null) this._clearTimeout(this._recoveryTimer);
+    this._recoveryTimer = null;
+    this._recoveryScheduledAt = 0;
+  }
+
   _startKeepalive() {
     this._stopKeepalive();
     let pingFailures = 0;
     this._keepalive = setInterval(async () => {
       const client = this._client;
       if (!client?.connected) return;
+      const server = this._current;
+      const startedAt = this._now();
       try {
         await client.request('server.ping');
         pingFailures = 0;
+        if (this._client === client && server) {
+          this._recordActiveSuccess(server, this._now() - startedAt);
+        }
       } catch {
         pingFailures++;
         if (pingFailures >= 2 && this._client === client) {
@@ -716,6 +871,7 @@ export class ServerPool extends EventEmitter {
 
   close() {
     this._closed = true;
+    this._cancelRecovery();
     for (const entry of this._subs.values()) entry.delivery.close();
     for (const entry of this._txSubs.values()) entry.delivery.close();
     this._subs.clear();

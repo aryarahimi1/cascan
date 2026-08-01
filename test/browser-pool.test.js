@@ -13,6 +13,7 @@ class FakeBrowserClient {
   }
 
   async connect() {
+    await this.spec.connectGate;
     if (this.spec.connectFails) throw transport('connect failed');
     this.connected = true;
     return this;
@@ -62,6 +63,7 @@ function application(message) {
 
 function makePool(specs, opts = {}) {
   const clients = new Map();
+  const created = new Map();
   const pool = new BrowserServerPool(
     specs.map(spec => ({ url: `wss://${spec.name}.example/` })),
     {
@@ -71,11 +73,12 @@ function makePool(specs, opts = {}) {
         const name = new URL(server.url).hostname.split('.')[0];
         const client = new FakeBrowserClient(specs.find(spec => spec.name === name));
         clients.set(name, client);
+        created.set(name, (created.get(name) ?? 0) + 1);
         return client;
       },
     },
   );
-  return { pool, clients };
+  return { pool, clients, created };
 }
 
 test('browser pool: skips a dead server and connects to the next healthy server', async () => {
@@ -132,6 +135,102 @@ test('browser pool: all dead servers fail loudly', async () => {
     { name: 'beta', connectFails: true },
   ]);
   await assert.rejects(() => pool.acquire(), AllServersFailedError);
+  pool.close();
+});
+
+test('browser pool: close cancels a pending recovery timer even when its handle is zero', () => {
+  const cleared = [];
+  const { pool } = makePool([
+    { name: 'alpha' },
+  ], {
+    setTimeout: () => 0,
+    clearTimeout: handle => cleared.push(handle),
+  });
+  pool._everConnected = true;
+
+  pool._scheduleRecovery();
+  assert.equal(pool._recoveryTimer, 0);
+  pool.close();
+
+  assert.deepEqual(cleared, [0]);
+  assert.equal(pool._recoveryTimer, null);
+});
+
+test('browser pool: close wins a race with an in-flight connection', async () => {
+  let releaseConnect;
+  const connectGate = new Promise(resolve => { releaseConnect = resolve; });
+  const { pool } = makePool([
+    { name: 'alpha', connectGate },
+  ]);
+
+  const pending = pool.acquire();
+  await Promise.resolve();
+  pool.close();
+  releaseConnect();
+
+  await assert.rejects(pending, /pool closed/);
+  assert.equal(pool.current, null);
+  assert.equal(pool._keepalive, null);
+  assert.equal(pool._recoveryTimer, null);
+});
+
+test('browser pool: an open circuit is skipped without opening a WebSocket', async () => {
+  const { pool, created } = makePool([
+    { name: 'alpha' },
+    { name: 'beta' },
+  ]);
+  pool.servers[0].health.cooldownUntil = Date.now() + 60_000;
+  await pool.acquire();
+  assert.equal(pool.current, 'wss://beta.example/');
+  assert.equal(created.get('alpha'), undefined);
+  pool.close();
+});
+
+test('browser pool: an exhausted active pool recovers with one bounded timer', async () => {
+  const alpha = {
+    name: 'alpha',
+    connectFails: false,
+    responses: {
+      'blockchain.address.subscribe': () => STATUS_A,
+      lookup: () => {
+        alpha.connectFails = true;
+        throw transport('connection closed');
+      },
+    },
+  };
+  const beta = {
+    name: 'beta',
+    connectFails: true,
+    responses: { 'blockchain.address.subscribe': () => STATUS_B },
+  };
+  const { pool } = makePool([alpha, beta], {
+    random: () => 0,
+    failureBackoffBaseMs: 100,
+    failureBackoffMaxMs: 100,
+    recoveryBackoffBaseMs: 100,
+    recoveryBackoffMaxMs: 100,
+    retryBudgetAttempts: 4,
+    retryBudgetWindowMs: 1_000,
+  });
+  const seen = [];
+  await pool.subscribeAddress('bitcoincash:qrecovery', status => seen.push(status));
+  const scheduled = [];
+  const recovered = new Promise(resolve => pool.on('recovered', resolve));
+  pool.on('recovery-scheduled', event => scheduled.push(event));
+
+  await assert.rejects(() => pool.request('lookup'), AllServersFailedError);
+  assert.ok(pool._recoveryTimer);
+  const recoveryTimer = pool._recoveryTimer;
+  await assert.rejects(() => pool.acquire(), AllServersFailedError);
+  assert.equal(pool._recoveryTimer, recoveryTimer);
+  beta.connectFails = false;
+  const event = await recovered;
+
+  assert.equal(event.server, 'wss://beta.example/');
+  assert.equal(pool.current, 'wss://beta.example/');
+  assert.deepEqual(seen, [STATUS_B]);
+  assert.equal(scheduled.length, 1);
+  assert.equal(pool._recoveryTimer, null);
   pool.close();
 });
 

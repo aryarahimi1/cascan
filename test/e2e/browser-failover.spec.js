@@ -79,23 +79,30 @@ test('real browser verifies checkpoints, fails over, and restores a subscription
   await expect(page.locator('#watch-status')).toContainText('Subscription active');
   await expect(page.locator('#events')).toContainText('Failed over to wss://beta.test/');
   expect(pageErrors).toEqual([]);
+  await page.locator('#disconnect').click();
+  await expect(page.locator('#status')).toHaveText('Disconnected');
 });
 
-test('connects to and fails over across live BCH WSS endpoints @live', async ({ page }) => {
-  const liveRequested = process.env.CASCAN_LIVE_BROWSER
+test.describe('live BCH WSS endpoints', () => {
+  const liveRequested = Boolean(process.env.CASCAN_LIVE_BROWSER)
     || process.env.npm_lifecycle_event === 'test:browser:live';
   test.skip(!liveRequested, 'run npm run test:browser:live to probe public WSS endpoints');
-  test.setTimeout(60_000);
 
-  await page.goto('/examples/browser/');
-  await page.locator('#connect').click();
-  await expect(page.locator('#status')).toHaveText('Connected', { timeout: 30_000 });
-  await expect.poll(async () => Number(await page.locator('#height').textContent()))
-    .toBeGreaterThan(556767);
+  test('connects and fails over @live', async ({ page }) => {
+    test.setTimeout(60_000);
 
-  await page.locator('#watch').click();
-  await expect(page.locator('#watch-status')).toContainText('Subscription active');
-  await page.locator('#failover').click();
-  await expect(page.locator('#status')).toHaveText('Connected', { timeout: 30_000 });
-  await expect(page.locator('#events')).toContainText('Failed over to');
+    await page.goto('/examples/browser/');
+    await page.locator('#connect').click();
+    await expect(page.locator('#status')).toHaveText('Connected', { timeout: 30_000 });
+    await expect.poll(async () => Number(await page.locator('#height').textContent()))
+      .toBeGreaterThan(556767);
+
+    await page.locator('#watch').click();
+    await expect(page.locator('#watch-status')).toContainText('Subscription active');
+    await page.locator('#failover').click();
+    await expect(page.locator('#status')).toHaveText('Connected', { timeout: 30_000 });
+    await expect(page.locator('#events')).toContainText('Failed over to');
+    await page.locator('#disconnect').click();
+    await expect(page.locator('#status')).toHaveText('Disconnected');
+  });
 });

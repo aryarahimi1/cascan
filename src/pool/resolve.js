@@ -176,6 +176,10 @@ export async function defaultQuorumEntries(opts = {}) {
  *           subscriptionCheckMs?: number, subscriptionCheckBatchSize?: number,
  *           handlerRetryBaseMs?: number, handlerRetryMaxMs?: number,
  *           handlerTimeoutMs?: number,
+ *           failureBackoffBaseMs?: number, failureBackoffMaxMs?: number,
+ *           minHealthyUptimeMs?: number,
+ *           retryBudgetAttempts?: number, retryBudgetWindowMs?: number,
+ *           recoveryBackoffBaseMs?: number, recoveryBackoffMaxMs?: number,
  *           onLog?: (m) => void }} [opts]
  * @returns {Promise<{ pool: ServerPool, server: string }>}
  */
@@ -194,6 +198,13 @@ export async function connectPool(opts = {}) {
     handlerRetryBaseMs: opts.handlerRetryBaseMs,
     handlerRetryMaxMs: opts.handlerRetryMaxMs,
     handlerTimeoutMs: opts.handlerTimeoutMs,
+    failureBackoffBaseMs: opts.failureBackoffBaseMs,
+    failureBackoffMaxMs: opts.failureBackoffMaxMs,
+    minHealthyUptimeMs: opts.minHealthyUptimeMs,
+    retryBudgetAttempts: opts.retryBudgetAttempts,
+    retryBudgetWindowMs: opts.retryBudgetWindowMs,
+    recoveryBackoffBaseMs: opts.recoveryBackoffBaseMs,
+    recoveryBackoffMaxMs: opts.recoveryBackoffMaxMs,
   });
   await pool.acquire();
   return { pool, server: pool.current };

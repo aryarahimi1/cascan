@@ -37,6 +37,17 @@ test('Node API: callback delivery options are forwarded and fail fast', async ()
   );
 });
 
+test('Node API: reconnect policy options are forwarded and fail fast', async () => {
+  await assert.rejects(
+    () => connect({
+      servers: [{ host: 'never-dial.example', ports: { ssl: 50002 } }],
+      failureBackoffBaseMs: 100,
+      failureBackoffMaxMs: 10,
+    }),
+    /failureBackoffMaxMs must be greater than or equal to failureBackoffBaseMs/,
+  );
+});
+
 test('Node API: handler-error is visible through Cascan', () => {
   const pool = new FakePool({ height: 1 });
   const cascan = new Cascan(pool);
@@ -45,6 +56,20 @@ test('Node API: handler-error is visible through Cascan', () => {
   cascan.on('handler-error', event => { seen = event; });
   pool.emit('handler-error', expected);
   assert.equal(seen, expected);
+});
+
+test('Node API: recovery lifecycle events are visible through Cascan', () => {
+  const pool = new FakePool({ height: 1 });
+  const cascan = new Cascan(pool);
+  const events = [];
+  cascan.on('recovery-scheduled', event => events.push(['scheduled', event]));
+  cascan.on('recovered', event => events.push(['recovered', event]));
+  pool.emit('recovery-scheduled', { attempt: 1, delayMs: 500, retryAt: 1_000 });
+  pool.emit('recovered', { server: 'a.example:50002', outageMs: 500 });
+  assert.deepEqual(events, [
+    ['scheduled', { attempt: 1, delayMs: 500, retryAt: 1_000 }],
+    ['recovered', { server: 'a.example:50002', outageMs: 500 }],
+  ]);
 });
 
 test('Node API: balance and height use strict verification by default', async () => {

@@ -43,7 +43,10 @@ export class Cascan extends EventEmitter {
     this.pool = pool;
     this.network = opts.network ?? 'mainnet';
     this.defaults = { verify: opts.verify !== false };
-    for (const ev of ['failover', 'failover-start', 'server-lost', 'exhausted', 'handler-error']) {
+    for (const ev of [
+      'failover', 'failover-start', 'server-lost', 'exhausted', 'handler-error',
+      'recovery-scheduled', 'recovered', 'server-stable',
+    ]) {
       pool.on(ev, (payload) => this.emit(ev, payload));
     }
   }
@@ -159,6 +162,7 @@ export class Cascan extends EventEmitter {
   servers() {
     const ranked = this.pool.ranked();
     const maxHeight = consensusHeight(ranked);
+    const now = Date.now();
     return ranked.map(s => ({
       host: s.host,
       ports: s.ports,
@@ -171,6 +175,10 @@ export class Cascan extends EventEmitter {
       height: s.health.height,
       latencyMs: s.health.latencyEmaMs,
       failures: s.health.failures,
+      cooldownUntil: s.health.cooldownUntil > now
+        ? new Date(s.health.cooldownUntil).toISOString()
+        : null,
+      cooldownMs: Math.max(0, (s.health.cooldownUntil ?? 0) - now),
       score: Math.round(scoreServer(s, maxHeight) * 10) / 10,
       connected: this.pool.current === serverName(s),
     }));
@@ -197,6 +205,13 @@ export class Cascan extends EventEmitter {
  *   handlerRetryBaseMs?: number,
  *   handlerRetryMaxMs?: number,
  *   handlerTimeoutMs?: number,
+ *   failureBackoffBaseMs?: number,
+ *   failureBackoffMaxMs?: number,
+ *   minHealthyUptimeMs?: number,
+ *   retryBudgetAttempts?: number,
+ *   retryBudgetWindowMs?: number,
+ *   recoveryBackoffBaseMs?: number,
+ *   recoveryBackoffMaxMs?: number,
  *   cachePath?: string,
  *   onLog?: (m: string) => void,
  * }} [opts]
@@ -221,6 +236,13 @@ export async function connect(opts = {}) {
     handlerRetryBaseMs: opts.handlerRetryBaseMs,
     handlerRetryMaxMs: opts.handlerRetryMaxMs,
     handlerTimeoutMs: opts.handlerTimeoutMs,
+    failureBackoffBaseMs: opts.failureBackoffBaseMs,
+    failureBackoffMaxMs: opts.failureBackoffMaxMs,
+    minHealthyUptimeMs: opts.minHealthyUptimeMs,
+    retryBudgetAttempts: opts.retryBudgetAttempts,
+    retryBudgetWindowMs: opts.retryBudgetWindowMs,
+    recoveryBackoffBaseMs: opts.recoveryBackoffBaseMs,
+    recoveryBackoffMaxMs: opts.recoveryBackoffMaxMs,
     allowInsecureTransport: opts.allowInsecureTransport,
   });
   const bch = new Cascan(pool, { ...opts, network });

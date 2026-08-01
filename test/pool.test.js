@@ -150,6 +150,7 @@ class FakeClient {
     this.subscribed = [];
   }
   async connect() {
+    await this.spec.connectGate;
     if (this.spec.connectFails) throw new Error(`connect timeout after 1ms`);
     this.connected = true;
     return this;
@@ -176,6 +177,7 @@ class FakeClient {
 
 function makePool(specs, opts = {}) {
   const clients = new Map();
+  const created = new Map();
   const servers = specs.map(s => ({ host: s.name, ports: { ssl: 50002 }, tlsStrict: true }));
   const pool = new ServerPool(servers, {
     ...opts,
@@ -184,10 +186,11 @@ function makePool(specs, opts = {}) {
       const spec = specs.find(s => s.name === server.host);
       const client = new FakeClient(spec);
       clients.set(server.host, client);
+      created.set(server.host, (created.get(server.host) ?? 0) + 1);
       return client;
     },
   });
-  return { pool, clients };
+  return { pool, clients, created };
 }
 
 const tipHandler = () => ({ height: 1000, hex: '00' });
@@ -273,6 +276,172 @@ test('pool: every server dead → AllServersFailedError + exhausted event', asyn
   await assert.rejects(() => pool.request('x.y'), AllServersFailedError);
   assert.ok(exhausted, 'exhausted event emitted');
   assert.equal(exhausted.errors.length, 2);
+  pool.close();
+});
+
+test('pool: close cancels a pending recovery timer even when its handle is zero', () => {
+  const cleared = [];
+  const { pool } = makePool([
+    { name: 'alpha', handlers: {} },
+  ], {
+    setTimeout: () => 0,
+    clearTimeout: handle => cleared.push(handle),
+  });
+  pool._everConnected = true;
+
+  pool._scheduleRecovery();
+  assert.equal(pool._recoveryTimer, 0);
+  pool.close();
+
+  assert.deepEqual(cleared, [0]);
+  assert.equal(pool._recoveryTimer, null);
+});
+
+test('pool: close wins a race with an in-flight connection', async () => {
+  let releaseConnect;
+  const connectGate = new Promise(resolve => { releaseConnect = resolve; });
+  const { pool } = makePool([
+    { name: 'alpha', connectGate, handlers: { 'blockchain.headers.subscribe': tipHandler } },
+  ]);
+
+  const pending = pool.acquire();
+  await Promise.resolve();
+  pool.close();
+  releaseConnect();
+
+  await assert.rejects(pending, /pool closed/);
+  assert.equal(pool.current, null);
+  assert.equal(pool._keepalive, null);
+  assert.equal(pool._recoveryTimer, null);
+});
+
+test('pool: an open server circuit is skipped even when it would rank fastest', async () => {
+  const { pool, created } = makePool([
+    { name: 'alpha', handlers: { 'blockchain.headers.subscribe': tipHandler } },
+    { name: 'beta', handlers: { 'blockchain.headers.subscribe': tipHandler } },
+  ]);
+  const alpha = pool.servers.find(server => server.host === 'alpha');
+  alpha.health.latencyEmaMs = 1;
+  alpha.health.cooldownUntil = Date.now() + 60_000;
+
+  await pool.acquire();
+  assert.equal(pool.current, 'beta:50002');
+  assert.equal(created.get('alpha'), undefined, 'open circuit was never dialed');
+  pool.close();
+});
+
+test('pool: the global dial budget caps a hostile all-dead pool', async () => {
+  const { pool, created } = makePool(
+    Array.from({ length: 6 }, (_, index) => ({
+      name: `dead-${index}`,
+      connectFails: true,
+      handlers: {},
+    })),
+    { retryBudgetAttempts: 2 },
+  );
+
+  await assert.rejects(
+    () => pool.acquire(),
+    error => error instanceof AllServersFailedError
+      && error.errors.some(item => /retry budget exhausted/.test(item.message)),
+  );
+  assert.equal([...created.values()].reduce((sum, count) => sum + count, 0), 2);
+  assert.equal(pool._recoveryTimer, null, 'an initial failed connect cannot leak a background pool');
+  pool.close();
+});
+
+test('pool: concurrent transport failures share one failover transition', async () => {
+  const { pool, created } = makePool([
+    { name: 'alpha', handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'x.y': () => 'TRANSPORT:connection closed',
+    } },
+    { name: 'beta', handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'x.y': () => 'rescued',
+    } },
+  ]);
+
+  const values = await Promise.all([pool.request('x.y'), pool.request('x.y')]);
+  assert.deepEqual(values, ['rescued', 'rescued']);
+  assert.equal(created.get('beta'), 1, 'only one replacement socket was created');
+  pool.close();
+});
+
+test('pool: setup success keeps failure debt until minimum healthy uptime', async () => {
+  let now = 0;
+  const { pool } = makePool([
+    { name: 'alpha', handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      ping: () => 'pong',
+    } },
+  ], {
+    now: () => now,
+    minHealthyUptimeMs: 1_000,
+  });
+  await pool.acquire();
+  const health = pool.servers[0].health;
+  health.failures = 3;
+
+  now = 999;
+  assert.equal(await pool.request('ping'), 'pong');
+  assert.equal(health.failures, 3);
+  now = 1_000;
+  assert.equal(await pool.request('ping'), 'pong');
+  assert.equal(health.failures, 0);
+  assert.equal(pool._retryController.attempts, 0, 'stable uptime resets the global episode budget');
+  pool.close();
+});
+
+test('pool: an exhausted active pool recovers once with bounded background retries', async () => {
+  const alpha = {
+    name: 'alpha',
+    connectFails: false,
+    handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'blockchain.address.subscribe': () => STATUS_A,
+      'x.y': () => {
+        alpha.connectFails = true;
+        return 'TRANSPORT:connection closed';
+      },
+    },
+  };
+  const beta = {
+    name: 'beta',
+    connectFails: true,
+    handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'blockchain.address.subscribe': () => STATUS_B,
+    },
+  };
+  const { pool } = makePool([alpha, beta], {
+    random: () => 0,
+    failureBackoffBaseMs: 100,
+    failureBackoffMaxMs: 100,
+    recoveryBackoffBaseMs: 100,
+    recoveryBackoffMaxMs: 100,
+    retryBudgetAttempts: 4,
+    retryBudgetWindowMs: 1_000,
+  });
+  const seen = [];
+  await pool.subscribeAddress('bitcoincash:qrecovery', status => seen.push(status));
+  const scheduled = [];
+  const recovered = new Promise(resolve => pool.once('recovered', resolve));
+  pool.on('recovery-scheduled', event => scheduled.push(event));
+
+  await assert.rejects(() => pool.request('x.y'), AllServersFailedError);
+  assert.ok(pool._recoveryTimer, 'one background recovery is scheduled');
+  const recoveryTimer = pool._recoveryTimer;
+  await assert.rejects(() => pool.acquire(), AllServersFailedError);
+  assert.equal(pool._recoveryTimer, recoveryTimer, 'repeated callers share the existing recovery timer');
+  beta.connectFails = false;
+  const event = await recovered;
+
+  assert.equal(event.server, 'beta:50002');
+  assert.equal(pool.current, 'beta:50002');
+  assert.deepEqual(seen, [STATUS_B], 'recovery restored and reconciled the subscription');
+  assert.equal(scheduled.length, 1);
+  assert.equal(pool._recoveryTimer, null);
   pool.close();
 });
 

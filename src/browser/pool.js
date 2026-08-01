@@ -1,7 +1,8 @@
 import { BrowserFulcrumClient } from './client.js';
 import { AllServersFailedError, isTransportFailure } from '../fulcrum/errors.js';
 import {
-  newHealth,
+  isServerCoolingDown,
+  normalizeHealth,
   rankServers,
   recordFailure,
   recordHeight,
@@ -13,6 +14,7 @@ import {
   MAX_SUBSCRIPTION_TIMER_MS,
   normalizeSubscriptionDeliveryOptions,
 } from '../subscriptions/delivery.js';
+import { normalizeRecoveryOptions, RetryController } from '../pool/recovery.js';
 
 const KEEPALIVE_MS = 45_000;
 const SUBSCRIPTION_CHECK_MS = 30_000;
@@ -29,9 +31,18 @@ export class BrowserServerPool {
     if (servers.length > MAX_BROWSER_SERVERS) {
       throw new RangeError(`browser Fulcrum pool is limited to ${MAX_BROWSER_SERVERS} servers`);
     }
+    this._now = typeof opts.now === 'function' ? opts.now : Date.now;
+    this._random = typeof opts.random === 'function' ? opts.random : Math.random;
+    this._setTimeout = typeof opts.setTimeout === 'function' ? opts.setTimeout : setTimeout;
+    this._clearTimeout = typeof opts.clearTimeout === 'function' ? opts.clearTimeout : clearTimeout;
+    this._recoveryPolicy = normalizeRecoveryOptions(opts, servers.length);
+    const healthNow = this._now();
     this.servers = servers.map(server => ({
       ...server,
-      health: server.health ?? newHealth(),
+      health: normalizeHealth(server.health, {
+        now: healthNow,
+        maxCooldownMs: this._recoveryPolicy.failureBackoffMaxMs,
+      }),
       tlsStrict: true,
     }));
     this.timeoutMs = opts.timeoutMs ?? 10_000;
@@ -49,6 +60,7 @@ export class BrowserServerPool {
       retryMaxMs: opts.handlerRetryMaxMs,
       handlerTimeoutMs: opts.handlerTimeoutMs,
     });
+    this._retryController = new RetryController(this._recoveryPolicy, { random: this._random });
     this._clientFactory = opts.clientFactory ?? (server => new BrowserFulcrumClient({
       url: server.url,
       network: opts.network,
@@ -61,6 +73,12 @@ export class BrowserServerPool {
     this._current = null;
     this._connecting = null;
     this._failingOver = null;
+    this._activeSince = null;
+    this._activeStable = false;
+    this._everConnected = false;
+    this._exhaustedSince = null;
+    this._recoveryTimer = null;
+    this._recoveryScheduledAt = 0;
     this._subscriptions = new Map();
     this._restoring = false;
     this._stagedStatuses = new Map();
@@ -78,7 +96,37 @@ export class BrowserServerPool {
   }
 
   ranked() {
-    return rankServers(this.servers);
+    return rankServers(this.servers, this._now());
+  }
+
+  _recordServerFailure(server) {
+    if (!server) return;
+    recordFailure(server.health, {
+      now: this._now(),
+      random: this._random,
+      failureBackoffBaseMs: this._recoveryPolicy.failureBackoffBaseMs,
+      failureBackoffMaxMs: this._recoveryPolicy.failureBackoffMaxMs,
+    });
+  }
+
+  _recordSetupSuccess(server, latencyMs, height = null) {
+    recordSuccess(server.health, latencyMs, height, {
+      now: this._now(),
+      clearFailures: false,
+    });
+  }
+
+  _recordActiveSuccess(server, latencyMs, height = null) {
+    const now = this._now();
+    const stable = server === this._current
+      && this._activeSince !== null
+      && (now - this._activeSince) >= this._recoveryPolicy.minHealthyUptimeMs;
+    recordSuccess(server.health, latencyMs, height, { now, clearFailures: stable });
+    if (stable && !this._activeStable) {
+      this._activeStable = true;
+      this._retryController.noteStable(now);
+      this.emit('server-stable', { server: this.current, uptimeMs: now - this._activeSince });
+    }
   }
 
   on(event, fn) {
@@ -113,14 +161,25 @@ export class BrowserServerPool {
 
   async _connect() {
     const errors = [];
+    let budgetExhausted = false;
+    let eligibleServers = 0;
 
     for (const server of this.ranked()) {
+      if (this._closed) throw new Error('pool closed');
+      const attemptAt = this._now();
+      if (isServerCoolingDown(server, attemptAt)) continue;
+      eligibleServers++;
+      if (!this._retryController.take(attemptAt)) {
+        budgetExhausted = true;
+        break;
+      }
       const client = this._clientFactory(server);
       let activated = false;
       let closedDuringSetup = false;
-      const startedAt = Date.now();
+      const startedAt = this._now();
       try {
         await client.connect();
+        if (this._closed) throw new Error('pool closed');
         client.onClose(() => {
           if (!activated) {
             closedDuringSetup = true;
@@ -130,7 +189,7 @@ export class BrowserServerPool {
           this._failover('connection closed').catch(() => { /* exhausted event is emitted */ });
         });
         const tip = await client.request('blockchain.headers.subscribe');
-        recordSuccess(server.health, Date.now() - startedAt, validHeight(tip?.height));
+        this._recordSetupSuccess(server, this._now() - startedAt, validHeight(tip?.height));
 
         this._client = client;
         this._current = server;
@@ -138,15 +197,33 @@ export class BrowserServerPool {
           if (this._client === client) this._onNotification(method, params);
         });
         await this._restoreSubscriptions(client);
-        if (closedDuringSetup || !client.connected) throw new Error('connection closed during pool setup');
+        if (this._closed || closedDuringSetup || !client.connected) {
+          throw new Error('connection closed during pool setup');
+        }
         activated = true;
+        this._activeSince = this._now();
+        this._activeStable = false;
+        this._everConnected = true;
+        this._cancelRecovery();
         this._startKeepalive();
         this._startSubscriptionChecks();
 
+        if (this._exhaustedSince !== null) {
+          const exhaustedSince = this._exhaustedSince;
+          this._exhaustedSince = null;
+          this.emit('recovered', {
+            server: this.current,
+            outageMs: Math.max(0, this._now() - exhaustedSince),
+          });
+        }
+
         return client;
       } catch (err) {
-        recordFailure(server.health);
-        errors.push(err);
+        const closing = this._closed;
+        if (!closing) {
+          this._recordServerFailure(server);
+          errors.push(err);
+        }
         if (this._client === client) {
           this._stopKeepalive();
           this._stopSubscriptionChecks();
@@ -154,12 +231,27 @@ export class BrowserServerPool {
           this._current = null;
         }
         client.close();
+        if (closing) throw new Error('pool closed');
         this.emit('server-lost', { server: server.url, error: err?.message ?? String(err) });
       }
     }
 
+    if (budgetExhausted) errors.push(new Error('global Fulcrum connection retry budget exhausted'));
+    if (eligibleServers === 0 && errors.length === 0) {
+      errors.push(new Error('all eligible Fulcrum server circuits are cooling down'));
+    }
+
     const exhausted = new AllServersFailedError(errors);
-    this.emit('exhausted', { errors: errors.map(error => error?.message ?? String(error)) });
+    if (this._everConnected && this._exhaustedSince === null) this._exhaustedSince = this._now();
+    const recovery = this._scheduleRecovery();
+    if (recovery) {
+      exhausted.retryAt = recovery.retryAt;
+      exhausted.retryAfterMs = recovery.delayMs;
+    }
+    this.emit('exhausted', {
+      errors: errors.map(error => error?.message ?? String(error)),
+      ...(recovery ? { recovery } : {}),
+    });
     throw exhausted;
   }
 
@@ -170,10 +262,10 @@ export class BrowserServerPool {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const client = await this.acquire();
       const server = this._current;
-      const startedAt = Date.now();
+      const startedAt = this._now();
       try {
         const result = await client.request(method, params);
-        recordSuccess(server.health, Date.now() - startedAt);
+        this._recordActiveSuccess(server, this._now() - startedAt);
         return result;
       } catch (err) {
         lastError = err;
@@ -282,7 +374,7 @@ export class BrowserServerPool {
 
   async _performFailover(reason) {
     const from = this.current;
-    if (this._current) recordFailure(this._current.health);
+    if (this._current) this._recordServerFailure(this._current);
     this._teardownClient();
     this.emit('failover-start', { from, reason });
     await this.acquire();
@@ -318,7 +410,7 @@ export class BrowserServerPool {
     } else if (method === 'blockchain.headers.subscribe') {
       const tip = Array.isArray(params) ? params[0] : params;
       if (isValidBchHeight(tip?.height) && this._current) {
-        recordHeight(this._current.health, tip.height);
+        recordHeight(this._current.health, tip.height, this._now());
         this.emit('block', { height: tip.height, hex: typeof tip.hex === 'string' ? tip.hex : null });
       }
     }
@@ -424,6 +516,47 @@ export class BrowserServerPool {
     this._subscriptionCheckInFlight = false;
   }
 
+  _earliestCircuitAt(now) {
+    let earliest = Infinity;
+    for (const server of this.servers) {
+      const until = Number.isFinite(server.health.cooldownUntil)
+        ? server.health.cooldownUntil
+        : now;
+      earliest = Math.min(earliest, Math.max(now, until));
+    }
+    return Number.isFinite(earliest) ? earliest : now;
+  }
+
+  _scheduleRecovery() {
+    if (this._closed || !this._everConnected) return null;
+    if (this._recoveryTimer !== null) {
+      return {
+        attempt: this._retryController.recoveryFailures,
+        delayMs: Math.max(1, this._recoveryScheduledAt - this._now()),
+        retryAt: this._recoveryScheduledAt,
+      };
+    }
+
+    const now = this._now();
+    const recovery = this._retryController.noteExhaustion(now, this._earliestCircuitAt(now));
+    this._recoveryScheduledAt = recovery.retryAt;
+    this._recoveryTimer = this._setTimeout(() => {
+      this._recoveryTimer = null;
+      this._recoveryScheduledAt = 0;
+      if (this._closed || this._client?.connected) return;
+      this.acquire().catch(() => { /* _connect schedules the next bounded attempt */ });
+    }, recovery.delayMs);
+    this._recoveryTimer.unref?.();
+    this.emit('recovery-scheduled', recovery);
+    return recovery;
+  }
+
+  _cancelRecovery() {
+    if (this._recoveryTimer !== null) this._clearTimeout(this._recoveryTimer);
+    this._recoveryTimer = null;
+    this._recoveryScheduledAt = 0;
+  }
+
   _startKeepalive() {
     this._stopKeepalive();
     let failures = 0;
@@ -431,10 +564,15 @@ export class BrowserServerPool {
     this._keepalive = setInterval(async () => {
       const client = this._client;
       if (!client?.connected || inFlight) return;
+      const server = this._current;
+      const startedAt = this._now();
       inFlight = true;
       try {
         await client.request('server.ping');
         failures = 0;
+        if (this._client === client && server) {
+          this._recordActiveSuccess(server, this._now() - startedAt);
+        }
       } catch {
         failures++;
         if (failures >= 2 && this._client === client) {
@@ -457,6 +595,8 @@ export class BrowserServerPool {
   _teardownClient() {
     this._stopKeepalive();
     this._stopSubscriptionChecks();
+    this._activeSince = null;
+    this._activeStable = false;
     const client = this._client;
     this._client = null;
     this._current = null;
@@ -465,6 +605,7 @@ export class BrowserServerPool {
 
   close() {
     this._closed = true;
+    this._cancelRecovery();
     for (const entry of this._subscriptions.values()) entry.callbacks.close();
     this._subscriptions.clear();
     this._teardownClient();
