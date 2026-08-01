@@ -18,6 +18,18 @@ npm assigned `latest` to the only published version and rejects removing that
 required tag. Public beta instructions therefore pin the exact prerelease;
 `latest` is not a claim of production stability.
 
+## Promoted beta record
+
+`@aryarh/cascan@0.4.0-beta.2` was staged by the trusted GitHub publisher from
+annotated tag `v0.4.0-beta.2` at commit
+`194efe12cb0437c40317b19a97a2cffc67e0662c`, inspected from npm's staging
+queue, and approved with maintainer 2FA. Its registry SHA-1 is
+`7ad7965bb108eb61c367e990cc3216de9b180f68`; its SHA-512 integrity is
+`sha512-gatkGp/4fF5wr2uk7D3tm9km16WayoCGmi5mqW9w4DVeAIJ1WZnFoDBKz3347jL7btYXKpuh/64Ke/gMq72bqQ==`.
+npm records SLSA provenance for the GitHub Actions build, and a clean `@next`
+install verified the Node export, browser export, CLI version, and zero known
+production dependency vulnerabilities.
+
 ## One-time owner setup
 
 1. Create or recover the maintainer's npm account and enable account-level 2FA.
