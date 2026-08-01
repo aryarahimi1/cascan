@@ -145,7 +145,7 @@ export async function cmdCampaign(parsed) {
       return { envelope: wrap(SCHEMA.CAMPAIGN, first.data, meta), human, meta };
     }
 
-    // Live mode: NDJSON events on every change.
+    // Live mode: NDJSON updates after each reconciled status trigger.
     const emit = (event, snap) => {
       const env = wrapEvent(SCHEMA.CAMPAIGN, event, {
         data: snap.data ?? snap,
@@ -187,10 +187,11 @@ export async function cmdCampaign(parsed) {
       }
     };
 
-    // Pool-managed subscription: survives failover; gap changes delivered.
-    await pool.subscribeAddress(rec.cashaddr, () => {
-      onChange().catch(err => process.stderr.write(`! campaign handler error: ${err?.message ?? err}\n`));
+    // Pool-managed subscription: survives failover; current gap state is reconciled.
+    pool.on('handler-error', event => {
+      process.stderr.write(`! campaign handler error (${event.eventId}, retry ${event.attempt}): ${event.error}\n`);
     });
+    await pool.subscribeAddress(rec.cashaddr, () => onChange());
 
     const exitCode = await new Promise((resolve) => {
       const onSigint = () => {

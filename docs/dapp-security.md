@@ -33,6 +33,21 @@ Address subscription callbacks are validated status-change signals, not
 payment proofs. On a callback, refetch the relevant state through the default
 verified API before taking a money-moving action.
 
+Subscription delivery is acknowledged in memory. A callback may return a
+promise; a throw, rejection, or timeout emits `handler-error` and retries with
+the same `event.id`. Use that ID as an idempotency key for side effects. A
+timeout cannot cancel JavaScript already running, so a late first attempt may
+overlap its retry. Do not write a handler that charges, credits, broadcasts,
+or sends a webhook twice merely because it ran twice.
+
+Observed upstream state is tracked separately from successfully delivered
+state. While one event is awaiting acknowledgement, cascan retains it and
+coalesces later unstarted observations to the newest status. The pool also
+periodically re-queries a bounded round-robin batch of subscriptions to detect
+a notification channel that went silent while ping remained healthy. These
+properties recover state-change triggers; they do not create an append-only
+transaction feed.
+
 Automatic Node discovery treats DNS seed, gossip, and cached endpoints as
 untrusted. It rejects private, loopback, link-local, metadata, multicast,
 documentation, benchmarking, and reserved destinations; rejects mixed
@@ -107,6 +122,11 @@ Direct Electrum connections expose the user's IP address and queried BCH
 addresses to each selected operator. Never send private keys, seed phrases,
 or signing material through any Electrum request.
 
+Browser `watch()` uses the same callback acknowledgement, retry ID, bounded
+backpressure, and periodic state re-query behavior as Node. It still observes
+one active server at a time, so delivery reliability does not turn the
+server's claim into independent verification.
+
 ## Residual trust limits
 
 - Checkpoints prove a server follows BCH history at the pinned fork heights;
@@ -123,12 +143,21 @@ or signing material through any Electrum request.
 - A Node strict query fails closed when it cannot obtain required agreement.
   Availability is intentionally traded for integrity on money-relevant
   default calls.
+- Subscription delivery is not durable. Closing/reloading the page or process
+  clears pending attempts and event IDs. Reconcile current state on startup.
+- At-least-once delivery permits duplicates, and backpressure coalesces
+  intermediate unstarted statuses. Handlers must be idempotent and must query
+  the state they need instead of treating callbacks as a complete ledger.
 
 ## Integration checklist
 
 1. Keep strict verification enabled (the default) for financial decisions.
 2. Persist receipts with high-value application decisions.
 3. Treat `watch()` and browser events as triggers to re-query, not proof.
-4. Handle `QuorumDisagreementError` and `AllServersFailedError` as a
+4. Make async watch handlers idempotent on `event.id`; monitor
+   `handler-error`, and return the side-effect promise so failures are retried.
+5. Reconcile current state on every process/page start; callback retries are
+   not a durable queue.
+6. Handle `QuorumDisagreementError` and `AllServersFailedError` as a
    fail-closed state; never substitute a cached or single-server answer.
-5. Disclose Electrum query/IP privacy to browser users.
+7. Disclose Electrum query/IP privacy to browser users.

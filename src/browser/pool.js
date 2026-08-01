@@ -8,8 +8,15 @@ import {
   recordSuccess,
 } from '../pool/health.js';
 import { MAX_REASONABLE_BCH_HEIGHT, isValidBchHeight } from '../validation.js';
+import {
+  SubscriptionDelivery,
+  MAX_SUBSCRIPTION_TIMER_MS,
+  normalizeSubscriptionDeliveryOptions,
+} from '../subscriptions/delivery.js';
 
 const KEEPALIVE_MS = 45_000;
+const SUBSCRIPTION_CHECK_MS = 30_000;
+const SUBSCRIPTION_CHECK_BATCH = 32;
 export const MAX_BROWSER_SERVERS = 32;
 export const MAX_BROWSER_SUBSCRIPTIONS = 1_000;
 export { MAX_REASONABLE_BCH_HEIGHT };
@@ -29,6 +36,19 @@ export class BrowserServerPool {
     }));
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     this.keepaliveMs = opts.keepaliveMs ?? KEEPALIVE_MS;
+    this.subscriptionCheckMs = opts.subscriptionCheckMs ?? SUBSCRIPTION_CHECK_MS;
+    this.subscriptionCheckBatchSize = opts.subscriptionCheckBatchSize ?? SUBSCRIPTION_CHECK_BATCH;
+    if (!Number.isInteger(this.subscriptionCheckMs) || this.subscriptionCheckMs < 1 || this.subscriptionCheckMs > MAX_SUBSCRIPTION_TIMER_MS) {
+      throw new RangeError(`subscriptionCheckMs must be an integer from 1 to ${MAX_SUBSCRIPTION_TIMER_MS}`);
+    }
+    if (!Number.isInteger(this.subscriptionCheckBatchSize) || this.subscriptionCheckBatchSize < 1 || this.subscriptionCheckBatchSize > 256) {
+      throw new RangeError('subscriptionCheckBatchSize must be an integer from 1 to 256');
+    }
+    this._deliveryOptions = normalizeSubscriptionDeliveryOptions({
+      retryBaseMs: opts.handlerRetryBaseMs,
+      retryMaxMs: opts.handlerRetryMaxMs,
+      handlerTimeoutMs: opts.handlerTimeoutMs,
+    });
     this._clientFactory = opts.clientFactory ?? (server => new BrowserFulcrumClient({
       url: server.url,
       network: opts.network,
@@ -46,6 +66,10 @@ export class BrowserServerPool {
     this._stagedStatuses = new Map();
     this._restoreError = null;
     this._keepalive = null;
+    this._subscriptionCheck = null;
+    this._subscriptionCheckCursor = 0;
+    this._subscriptionCheckInFlight = false;
+    this._subscriptionCheckGeneration = 0;
     this._closed = false;
   }
 
@@ -92,29 +116,44 @@ export class BrowserServerPool {
 
     for (const server of this.ranked()) {
       const client = this._clientFactory(server);
+      let activated = false;
+      let closedDuringSetup = false;
       const startedAt = Date.now();
       try {
         await client.connect();
+        client.onClose(() => {
+          if (!activated) {
+            closedDuringSetup = true;
+            return;
+          }
+          if (this._closed || this._client !== client) return;
+          this._failover('connection closed').catch(() => { /* exhausted event is emitted */ });
+        });
         const tip = await client.request('blockchain.headers.subscribe');
         recordSuccess(server.health, Date.now() - startedAt, validHeight(tip?.height));
 
         this._client = client;
         this._current = server;
-        client.onNotification((method, params) => this._onNotification(method, params));
-        await this._restoreSubscriptions();
-        client.onClose(() => {
-          if (this._closed || this._client !== client) return;
-          this._failover('connection closed').catch(() => { /* exhausted event is emitted */ });
+        client.onNotification((method, params) => {
+          if (this._client === client) this._onNotification(method, params);
         });
-        if (!client.connected) throw new Error('connection closed during pool setup');
+        await this._restoreSubscriptions(client);
+        if (closedDuringSetup || !client.connected) throw new Error('connection closed during pool setup');
+        activated = true;
         this._startKeepalive();
+        this._startSubscriptionChecks();
 
         return client;
       } catch (err) {
         recordFailure(server.health);
         errors.push(err);
+        if (this._client === client) {
+          this._stopKeepalive();
+          this._stopSubscriptionChecks();
+          this._client = null;
+          this._current = null;
+        }
         client.close();
-        if (this._client === client) this._teardownClient();
         this.emit('server-lost', { server: server.url, error: err?.message ?? String(err) });
       }
     }
@@ -151,6 +190,31 @@ export class BrowserServerPool {
     return this.current;
   }
 
+  _newAddressEntry(address) {
+    const entry = {
+      callbacks: null,
+      observedStatus: null,
+      deliveredStatus: null,
+      initialized: false,
+      initializing: null,
+      pendingInitial: null,
+    };
+    entry.callbacks = new SubscriptionDelivery({
+      type: 'address-status',
+      key: address,
+      ...this._deliveryOptions,
+      onDelivered: value => { entry.deliveredStatus = value; },
+      onHandlerError: payload => this.emit('handler-error', payload),
+    });
+    return entry;
+  }
+
+  _observeAddress(entry, status, source) {
+    if (!entry.initialized || Object.is(status, entry.observedStatus)) return null;
+    entry.observedStatus = status;
+    return entry.callbacks.observe(status, source);
+  }
+
   async subscribeAddress(address, callback) {
     if (typeof address !== 'string' || address.length === 0 || address.length > 256) {
       throw new TypeError('subscription address must be a non-empty string of at most 256 characters');
@@ -162,24 +226,26 @@ export class BrowserServerPool {
       if (this._subscriptions.size >= MAX_BROWSER_SUBSCRIPTIONS) {
         throw new RangeError(`browser subscription limit is ${MAX_BROWSER_SUBSCRIPTIONS}`);
       }
-      entry = {
-        callbacks: new Set(),
-        lastStatus: null,
-        initialized: false,
-        initializing: null,
-      };
+      entry = this._newAddressEntry(address);
       this._subscriptions.set(address, entry);
     }
     entry.callbacks.add(callback);
-    if (entry.initialized) return entry.lastStatus;
+    if (entry.initialized) return entry.observedStatus;
 
     if (!entry.initializing) {
       entry.initializing = this.request('blockchain.address.subscribe', [address])
         .then(status => {
           const valid = requireStatus(status);
-          entry.lastStatus = valid;
+          entry.observedStatus = valid;
+          entry.deliveredStatus = valid;
+          entry.callbacks.setBaseline(valid);
           entry.initialized = true;
-          return valid;
+          const pending = entry.pendingInitial;
+          entry.pendingInitial = null;
+          if (pending?.client === this._client) {
+            this._observeAddress(entry, pending.value, 'notification');
+          }
+          return entry.observedStatus;
         })
         .finally(() => { entry.initializing = null; });
     }
@@ -188,7 +254,10 @@ export class BrowserServerPool {
       return await entry.initializing;
     } catch (err) {
       entry.callbacks.delete(callback);
-      if (entry.callbacks.size === 0) this._subscriptions.delete(address);
+      if (entry.callbacks.size === 0) {
+        entry.callbacks.close();
+        this._subscriptions.delete(address);
+      }
       throw err;
     }
   }
@@ -198,6 +267,7 @@ export class BrowserServerPool {
     if (!entry) return;
     entry.callbacks.delete(callback);
     if (entry.callbacks.size > 0) return;
+    entry.callbacks.close();
     this._subscriptions.delete(address);
     this._client?.request('blockchain.address.unsubscribe', [address]).catch(() => {});
   }
@@ -236,15 +306,15 @@ export class BrowserServerPool {
         this._failover('invalid address subscription notification').catch(() => {});
         return;
       }
+      if (!entry.initialized) {
+        entry.pendingInitial = { client: this._client, value: status };
+        return;
+      }
       if (this._restoring) {
         this._stagedStatuses.set(address, status);
         return;
       }
-      if (!entry.initialized || status === entry.lastStatus) return;
-      entry.lastStatus = status;
-      for (const callback of entry.callbacks) {
-        try { callback(status); } catch { /* user callback */ }
-      }
+      this._observeAddress(entry, status, 'notification');
     } else if (method === 'blockchain.headers.subscribe') {
       const tip = Array.isArray(params) ? params[0] : params;
       if (isValidBchHeight(tip?.height) && this._current) {
@@ -254,13 +324,17 @@ export class BrowserServerPool {
     }
   }
 
-  async _restoreSubscriptions() {
+  async _restoreSubscriptions(client) {
     this._restoring = true;
     this._stagedStatuses.clear();
     this._restoreError = null;
     try {
-      await this._resubscribeAll();
+      const restored = await this._resubscribeAll();
       if (this._restoreError) throw this._restoreError;
+      if (this._client !== client || !client.connected) {
+        throw new Error('connection closed during subscription restoration');
+      }
+      this._commitRestoredSubscriptions(restored);
     } finally {
       this._restoring = false;
       this._stagedStatuses.clear();
@@ -276,24 +350,78 @@ export class BrowserServerPool {
         await this._client.request('blockchain.address.subscribe', [address]),
       );
       if (this._restoreError) throw this._restoreError;
-      restored.set(address, { entry, before: entry.lastStatus, fresh });
+      restored.set(address, { entry, before: entry.observedStatus, fresh });
     }
 
-    // Commit only after every subscription is restored. If a notification
-    // arrived during restoration, it is staged and treated as the newest
-    // observation. No callback escapes from a candidate that is later
-    // rejected because another subscription failed.
+    return restored;
+  }
+
+  // Commit only after every subscription is restored and the candidate is
+  // still live. If a notification arrived during restoration, it is staged
+  // and treated as the newest observation. No callback escapes from a
+  // candidate that is later rejected because another subscription failed.
+  _commitRestoredSubscriptions(restored) {
     for (const [address, { entry, before, fresh }] of restored) {
-      if (entry.lastStatus !== before) continue;
+      if (entry.observedStatus !== before) continue;
       const finalStatus = this._stagedStatuses.has(address)
         ? this._stagedStatuses.get(address)
         : fresh;
       if (finalStatus === before) continue;
-      entry.lastStatus = finalStatus;
-      for (const callback of entry.callbacks) {
-        try { callback(finalStatus); } catch { /* user callback */ }
+      this._observeAddress(entry, finalStatus, 'resubscribe');
+    }
+  }
+
+  _startSubscriptionChecks() {
+    this._stopSubscriptionChecks();
+    const generation = this._subscriptionCheckGeneration;
+    this._subscriptionCheck = setInterval(() => {
+      if (this._subscriptionCheckInFlight || this._closed) return;
+      this._subscriptionCheckInFlight = true;
+      this._checkSubscriptionBatch()
+        .catch(() => { /* failover/exhausted is emitted by the pool */ })
+        .finally(() => {
+          if (this._subscriptionCheckGeneration === generation) {
+            this._subscriptionCheckInFlight = false;
+          }
+        });
+    }, this.subscriptionCheckMs);
+    this._subscriptionCheck.unref?.();
+  }
+
+  async _checkSubscriptionBatch() {
+    const client = this._client;
+    if (!client?.connected) return;
+    const subscriptions = [...this._subscriptions.entries()]
+      .filter(([, entry]) => entry.initialized);
+    if (subscriptions.length === 0) return;
+
+    const count = Math.min(this.subscriptionCheckBatchSize, subscriptions.length);
+    for (let offset = 0; offset < count; offset++) {
+      if (this._client !== client || !client.connected || this._closed) return;
+      const index = (this._subscriptionCheckCursor + offset) % subscriptions.length;
+      const [address, entry] = subscriptions[index];
+      try {
+        const status = requireStatus(
+          await client.request('blockchain.address.subscribe', [address]),
+        );
+        if (this._client === client) this._observeAddress(entry, status, 'liveness-check');
+      } catch (error) {
+        if (this._client === client && !this._closed) {
+          await this._failover(`subscription liveness check failed: ${error?.message ?? String(error)}`);
+        }
+        return;
       }
     }
+    this._subscriptionCheckCursor = (this._subscriptionCheckCursor + count) % subscriptions.length;
+  }
+
+  _stopSubscriptionChecks() {
+    this._subscriptionCheckGeneration++;
+    if (this._subscriptionCheck) {
+      clearInterval(this._subscriptionCheck);
+      this._subscriptionCheck = null;
+    }
+    this._subscriptionCheckInFlight = false;
   }
 
   _startKeepalive() {
@@ -328,6 +456,7 @@ export class BrowserServerPool {
 
   _teardownClient() {
     this._stopKeepalive();
+    this._stopSubscriptionChecks();
     const client = this._client;
     this._client = null;
     this._current = null;
@@ -336,6 +465,7 @@ export class BrowserServerPool {
 
   close() {
     this._closed = true;
+    for (const entry of this._subscriptions.values()) entry.callbacks.close();
     this._subscriptions.clear();
     this._teardownClient();
     this._events.clear();

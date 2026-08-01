@@ -25,11 +25,13 @@ Your app stops dying when a server dies — in ten lines:
 import { connect } from 'cascan';
 
 const bch = await connect();                       // DNS seed + gossip + probing; curated fallback
-const { totalSats } = await bch.balance('bitcoincash:qr7f…');
+const address = 'bitcoincash:qr7f…';
+const { totalSats } = await bch.balance(address);
 
-await bch.watch('bitcoincash:qr7f…', () => {       // survives server death:
-  console.log('payment activity!');                // resubscribed on the next server,
-});                                                // gap events delivered, none lost
+await bch.watch(address, async (_status, event) => {
+  const latest = await bch.balance(address);        // strict re-query, then acknowledge
+  console.log('payment activity', event.id, latest.totalSats);
+});                                                // stable ID across retries
 
 bch.on('failover', f => console.log(`${f.from} died → now on ${f.to}`));
 ```
@@ -65,6 +67,18 @@ to authorize money movement, token access, or confirmations.
 When the entire pool is unreachable you get `AllServersFailedError` —
 loud death, never silent staleness.
 
+`watch()` callbacks may be synchronous or async. A throw, rejected promise,
+or 30-second timeout emits `handler-error` and retries with bounded backoff
+and the same event ID. This is in-process **at-least-once** delivery, so make
+handlers idempotent using `event.id`; a timed-out handler may finish after its
+retry starts. While a handler is blocked, cascan retains the active event and
+only the newest not-yet-started status, because Electrum statuses are refresh
+signals rather than a transaction ledger. The pool also re-queries subscribed
+state in round-robin batches (every 30 seconds by default), so a working ping
+cannot hide a silent notification channel. There is no durable queue across a
+process/page crash: always re-query verified state after startup and on every
+callback.
+
 Full API reference: **[docs/library.md](docs/library.md)**. Networks:
 `mainnet` (default), `chipnet` — where CashScript contract development
 happens — and `testnet4`, each with its own verified pool and checkpoints:
@@ -86,7 +100,10 @@ import { connect } from 'cascan/browser';
 const bch = await connect();
 
 console.log(await bch.height(), bch.pool.current);
-await bch.watch(address, () => console.log('payment activity'));
+await bch.watch(address, async (_status, event) => {
+  const latest = await bch.balance(address);        // display only: one server's claim
+  console.log('payment activity', event.id, latest.totalSats);
+});
 ```
 
 Apps and users can still override the pool with
@@ -203,7 +220,7 @@ which server answered, at what height, and whether anyone disagreed.
 |---|---|
 | `balance <address>` | Quorum-checked balance **with CashTokens** (per-category FT amounts, NFTs, BCMR-enriched symbols). `--quorum any\|majority\|all` (default `majority`; `any` is the explicit low-latency option) |
 | `servers` | **Fleet health:** discovers the public Fulcrum fleet live (DNS seed + gossip + curated), verifies chain identity, and prints per-server transport, software, height, latency, and score — plus every rejected server with the reason. Refreshes the pool cache |
-| `watch <address>` | **Payments.** Pool-backed subscription → an event per new tx; a dying server triggers failover + subscription resurrection (`failover` event), not a dead watch. `--0conf` fires webhooks on mempool sightings, `--webhook <url>` POSTs envelopes, `--once` snapshots and exits |
+| `watch <address>` | **Payments.** Pool-backed status trigger with acknowledged callback delivery; a dying server triggers failover + subscription resurrection, and periodic re-queries recover silent notification loss. `--0conf` fires webhooks on mempool sightings, `--webhook <url>` POSTs envelopes, `--once` snapshots and exits |
 | `alert <address>` | **Standing conditions.** `--if "<path> <op> <number>"` (paths: `balance`, `balance.sats`, `balance.usd`, `unconfirmed`, `unconfirmed.sats`) polled on `--interval` (default 60s), quorum-checked. Fires `--webhook` on the false→true **edge** — state in `~/.cascan/alerts.json` dedupes across polls and restarts, re-arms when the condition goes false. `--dry-run` evaluates without firing, `--once` for cron |
 | `history <address>` | **Ledger export.** Full confirmed history → CSV (stdout or `--out file`): signed deltas, fees, receive/send/self classification. `--from`/`--to` date range, historical USD prices (keyless: Kraken dailies ≈ 2 years + CoinGecko ≤ 365 days; older rows honestly empty), `--cost-basis fifo` for realized-gain columns, `--no-prices` to skip. Fulcrum-only — no indexer, no API key |
 | `campaign <address>` | **Fundraisers.** Raised vs `--goal <BCH>`, donor proxy, progress bar. `--watch` streams progress/goal-reached events (NDJSON) → `--webhook` |

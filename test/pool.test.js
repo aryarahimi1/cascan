@@ -194,6 +194,13 @@ const tipHandler = () => ({ height: 1000, hex: '00' });
 const STATUS_A = 'a'.repeat(64);
 const STATUS_B = 'b'.repeat(64);
 const STATUS_C = 'c'.repeat(64);
+const waitFor = async (predicate, timeoutMs = 500) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for pool state');
+    await new Promise(resolve => setTimeout(resolve, 2));
+  }
+};
 
 // ---------------------------------------------------------------------------
 // failover
@@ -318,6 +325,28 @@ test('pool: status change DURING failover gap is delivered, not lost', async () 
   pool.close();
 });
 
+test('pool: retired socket notifications cannot overwrite the replacement state', async () => {
+  const { pool, clients } = makePool([
+    { name: 'alpha', handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'blockchain.address.subscribe': () => STATUS_A,
+    } },
+    { name: 'beta', handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'blockchain.address.subscribe': () => STATUS_B,
+    } },
+  ]);
+  const seen = [];
+  await pool.subscribeAddress('bitcoincash:qptest', status => seen.push(status));
+  const retired = clients.get('alpha');
+  await pool.killCurrent();
+  retired.fireNotification('blockchain.address.subscribe', ['bitcoincash:qptest', STATUS_C]);
+
+  assert.deepEqual(seen, [STATUS_B]);
+  assert.equal(pool._subs.get('bitcoincash:qptest').observedStatus, STATUS_B);
+  pool.close();
+});
+
 test('pool: failed resubscribe rejects the candidate and continues failover', async () => {
   const { pool } = makePool([
     { name: 'alpha', handlers: {
@@ -345,7 +374,42 @@ test('pool: failed resubscribe rejects the candidate and continues failover', as
   pool.close();
 });
 
-test('pool: live notifications dispatch to subscribers and update lastStatus', async () => {
+test('pool: rejected candidate cannot leak staged callbacks', async () => {
+  const addressOne = 'bitcoincash:qone';
+  const addressTwo = 'bitcoincash:qtwo';
+  const { pool } = makePool([
+    { name: 'alpha', handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'blockchain.address.subscribe': () => STATUS_A,
+    } },
+    { name: 'beta', handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'blockchain.address.subscribe': ([address], client) => {
+        if (address === addressOne) {
+          client.fireNotification('blockchain.address.subscribe', [address, STATUS_C]);
+          return STATUS_C;
+        }
+        return 'APP:second restore failed';
+      },
+    } },
+    { name: 'gamma', handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'blockchain.address.subscribe': () => STATUS_B,
+    } },
+  ]);
+  const seenOne = [];
+  const seenTwo = [];
+  await pool.subscribeAddress(addressOne, status => seenOne.push(status));
+  await pool.subscribeAddress(addressTwo, status => seenTwo.push(status));
+  await pool.killCurrent();
+
+  assert.equal(pool.current, 'gamma:50002');
+  assert.deepEqual(seenOne, [STATUS_B], 'beta staged status never escaped');
+  assert.deepEqual(seenTwo, [STATUS_B]);
+  pool.close();
+});
+
+test('pool: live notifications dispatch to subscribers and update observed status', async () => {
   const { pool, clients } = makePool([
     { name: 'alpha', handlers: {
       'blockchain.headers.subscribe': tipHandler,
@@ -360,6 +424,84 @@ test('pool: live notifications dispatch to subscribers and update lastStatus', a
   // header notifications keep height fresh for lag scoring
   clients.get('alpha').fireNotification('blockchain.headers.subscribe', [{ height: 1234 }]);
   assert.equal(pool.servers.find(s => s.host === 'alpha').health.height, 1234);
+  pool.close();
+});
+
+test('pool: a change during the initial subscribe handshake is not discarded', async () => {
+  const address = 'bitcoincash:qinitialrace';
+  const { pool } = makePool([
+    { name: 'alpha', handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'blockchain.address.subscribe': (_params, client) => {
+        client.fireNotification('blockchain.address.subscribe', [address, STATUS_B]);
+        return STATUS_A;
+      },
+    } },
+  ]);
+  const seen = [];
+  const current = await pool.subscribeAddress(address, (status, event) => {
+    seen.push({ status, source: event.source });
+  });
+
+  assert.equal(current, STATUS_B);
+  assert.deepEqual(seen, [{ status: STATUS_B, source: 'notification' }]);
+  pool.close();
+});
+
+test('pool: rejected async handlers retry visibly with the same event id', async () => {
+  const { pool, clients } = makePool([{
+    name: 'alpha',
+    handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'blockchain.address.subscribe': () => STATUS_A,
+    },
+  }], {
+    handlerRetryBaseMs: 2,
+    handlerRetryMaxMs: 4,
+    handlerTimeoutMs: 100,
+  });
+  const failures = [];
+  const attempts = [];
+  pool.on('handler-error', event => failures.push(event));
+  await pool.subscribeAddress('bitcoincash:qptest', async (status, event) => {
+    attempts.push({ status, ...event });
+    if (attempts.length === 1) throw new Error('database unavailable');
+  });
+
+  clients.get('alpha').fireNotification(
+    'blockchain.address.subscribe',
+    ['bitcoincash:qptest', STATUS_B],
+  );
+  const entry = pool._subs.get('bitcoincash:qptest');
+  assert.equal(entry.observedStatus, STATUS_B);
+  assert.equal(entry.deliveredStatus, STATUS_A, 'failed callback is not acknowledged');
+  await waitFor(() => attempts.length === 2 && entry.deliveredStatus === STATUS_B);
+
+  assert.equal(failures.length, 1);
+  assert.equal(attempts[0].id, attempts[1].id);
+  assert.equal(failures[0].eventId, attempts[0].id);
+  assert.deepEqual(attempts.map(attempt => attempt.attempt), [1, 2]);
+  pool.close();
+});
+
+test('pool: liveness re-query detects a change when notifications go silent', async () => {
+  let status = STATUS_A;
+  const { pool } = makePool([{
+    name: 'alpha',
+    handlers: {
+      'blockchain.headers.subscribe': tipHandler,
+      'blockchain.address.subscribe': () => status,
+    },
+  }]);
+  const events = [];
+  await pool.subscribeAddress('bitcoincash:qptest', (value, event) => events.push({ value, event }));
+  assert.ok(pool._subscriptionCheck, 'periodic liveness check is scheduled');
+  status = STATUS_C;
+
+  await pool._checkSubscriptionBatch();
+  assert.equal(events.length, 1);
+  assert.equal(events[0].value, STATUS_C);
+  assert.equal(events[0].event.source, 'liveness-check');
   pool.close();
 });
 

@@ -29,6 +29,11 @@ resolves connected — or throws
 | `verify` | `true` | strict quorum verification on `balance()`/`tx()`/`height()`; `false` is an explicit single-server trade-off |
 | `allowInsecureTransport` | `false` | explicit unauthenticated TLS/TCP escape hatch for diagnostics or non-payment reads; requires `verify: false`, and payment-mode quorum refuses insecure endpoints |
 | `timeoutMs` | `10000` | per-request timeout |
+| `subscriptionCheckMs` | `30000` | interval for round-robin subscription re-queries, which detect a silent notification channel that ping cannot detect |
+| `subscriptionCheckBatchSize` | `32` | maximum subscriptions re-queried per interval (1–256) |
+| `handlerRetryBaseMs` | `500` | initial callback retry delay after throw/rejection/timeout |
+| `handlerRetryMaxMs` | `30000` | maximum callback retry delay |
+| `handlerTimeoutMs` | `30000` | time before a callback attempt is treated as failed; timeout cannot cancel user code |
 | `cachePath` | `~/.cascan/servers*.json` | discovery cache location |
 | `onLog` | silent | discovery progress callback |
 
@@ -39,7 +44,7 @@ resolves connected — or throws
 | `balance(addr, {verify?})` | `{ address, confirmedSats, unconfirmedSats, totalSats, receipt? }` | sats are **strings** (BigInt-safe); strict quorum verification by default |
 | `tx(txid, {verbose?, verify?})` | `{ tx, receipt? }` | verbose by default; strict quorum verification by default |
 | `height({verify?})` | `number` | current chain tip; strict quorum verification by default |
-| `watch(addr, cb)` | `() => void` unsubscribe | cb fires on every status change — **including changes that happen during a failover gap** |
+| `watch(addr, cb)` | `() => void` unsubscribe | `cb(status, event)` accepts sync/async handlers; changed state during failover or a liveness re-query uses acknowledged at-least-once delivery |
 | `verify(method, params, {mode?, maxServers?, minAgreement?})` | `{ value, receipt }` | any Electrum method, cross-checked (default `majority`, capped at 4 independent operators); always requires at least two matching operator votes and rejects plurality/tie results |
 | `request(method, params)` | raw result | escape hatch, still failover-protected |
 | `servers()` | health snapshot | ranked, with visible scores |
@@ -47,7 +52,28 @@ resolves connected — or throws
 | `close()` | — | tears down the pool |
 
 Events (via `bch.on(...)`): `failover` `{from, to, reason}` ·
-`failover-start` · `server-lost` `{server, error}` · `exhausted` `{errors}`.
+`failover-start` · `server-lost` `{server, error}` · `exhausted` `{errors}` ·
+`handler-error` `{eventId, type, key, source, observedAt, attempt, error, willRetry}`.
+
+### Subscription delivery contract
+
+The second callback argument is frozen metadata:
+`{ id, type, key, source, observedAt, attempt }`. Resolving or returning from
+the callback acknowledges that attempt. A throw, rejected promise, or timeout
+emits `handler-error` and retries with the same `id`; `attempt` increases.
+This provides at-least-once delivery while the process/page remains alive.
+
+Handlers must be idempotent on `event.id`. JavaScript cannot cancel a timed-out
+handler, so the original attempt and a retry can overlap. Callback retries and
+event IDs are in memory only; a restart has no durable replay log. Under
+backpressure, cascan retains the active event and coalesces later unstarted
+observations to the newest state. Therefore callbacks are triggers to re-query
+current state, not a complete event ledger or payment proof.
+
+Every 30 seconds by default, the pool re-issues subscribe calls for a bounded,
+round-robin batch. A changed response enters the same delivery path with
+`source: 'liveness-check'`. This detects silent notification loss even when
+`server.ping` still works.
 
 Default verification separates availability from trust. DNS-seed/gossip
 servers remain in the failover pool but cannot vote on payment data. Built-in
@@ -60,7 +86,9 @@ assertions—not proof against hidden common ownership or collusion.
 
 ## Browser API
 
-`connect({ network?, servers?, timeoutMs?, keepaliveMs? })` automatically uses
+`connect({ network?, servers?, timeoutMs?, keepaliveMs?, subscriptionCheckMs?,
+subscriptionCheckBatchSize?, handlerRetryBaseMs?, handlerRetryMaxMs?,
+handlerTimeoutMs? })` automatically uses
 the selected network's built-in `wss://` bootstrap pool. It verifies each
 candidate against BCH fork checkpoints using Web Crypto, then connects to the
 best healthy endpoint. Passing `servers` overrides the bootstrap pool.
@@ -79,11 +107,11 @@ The returned `BrowserCascan` provides:
 |---|---|
 | `height()` | validated BCH height, but still one selected server's claim |
 | `balance(cashaddr)` | string satoshis; impossible supply values rejected |
-| `watch(cashaddr, cb)` | restored after failover; returns unsubscribe |
+| `watch(cashaddr, cb)` | same acknowledged callback/event-ID contract; restored after failover; returns unsubscribe |
 | `request(method, params)` | raw Electrum call with failover |
 | `servers()` | current health-ranked WSS pool |
 | `killCurrent(reason?)` | demo/test hook for real failover |
-| `on` / `off` | `failover`, `failover-start`, `server-lost`, `exhausted`, `block` |
+| `on` / `off` | `failover`, `failover-start`, `server-lost`, `exhausted`, `block`, `handler-error` |
 | `close()` | closes the pool and clears subscriptions |
 
 Browser security defaults: `wss://` only, certificate validation delegated to
@@ -102,7 +130,8 @@ and the residual trust limits.
 
 - One request failing on a live server → retried on the next-ranked server.
 - Server dies mid-session → `failover` event; subscriptions resubscribe on
-  the replacement and **gap changes are delivered** (status hashes compared).
+  the replacement and the latest observed gap state is delivered through the
+  acknowledged callback path (status hashes compared).
 - Application errors (`tx not found`) are answers, not failover triggers.
 - Whole pool unreachable → `AllServersFailedError` + `exhausted` event.
   Loud death, never silent staleness.
@@ -163,8 +192,9 @@ const c = new FulcrumClient({ host: 'electrum.imaginary.cash', port: 50004, tran
 ```
 
 `FulcrumClient` is the raw protocol primitive and does not independently apply
-the pool/quorum transport or checkpoint policy. Use `connect()`, `ServerPool`,
-or `queryQuorum()` for the enforced serving-socket guarantees.
+the pool/quorum transport, checkpoint, acknowledged-callback, or subscription
+liveness policy. Use `connect()`, `ServerPool`, or `queryQuorum()` for the
+corresponding enforced guarantees.
 
 ## Toolbox re-exports
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { Cascan } from '../src/index.js';
+import { Cascan, connect } from '../src/index.js';
 import { MAX_REASONABLE_BCH_HEIGHT } from '../src/validation.js';
 
 class FakePool extends EventEmitter {
@@ -24,6 +24,27 @@ test('Node API: height rejects an impossible server-reported value', async () =>
 test('Node API: height returns a valid BCH height', async () => {
   const cascan = new Cascan(new FakePool({ height: 900_002 }));
   assert.equal(await cascan.height({ verify: false }), 900_002);
+});
+
+test('Node API: callback delivery options are forwarded and fail fast', async () => {
+  await assert.rejects(
+    () => connect({
+      servers: [{ host: 'never-dial.example', ports: { ssl: 50002 } }],
+      handlerRetryBaseMs: 100,
+      handlerRetryMaxMs: 10,
+    }),
+    /retryMaxMs must be greater than or equal to retryBaseMs/,
+  );
+});
+
+test('Node API: handler-error is visible through Cascan', () => {
+  const pool = new FakePool({ height: 1 });
+  const cascan = new Cascan(pool);
+  const expected = { eventId: 'delivery-1', willRetry: true };
+  let seen;
+  cascan.on('handler-error', event => { seen = event; });
+  pool.emit('handler-error', expected);
+  assert.equal(seen, expected);
 });
 
 test('Node API: balance and height use strict verification by default', async () => {

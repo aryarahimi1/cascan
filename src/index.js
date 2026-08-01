@@ -43,7 +43,7 @@ export class Cascan extends EventEmitter {
     this.pool = pool;
     this.network = opts.network ?? 'mainnet';
     this.defaults = { verify: opts.verify !== false };
-    for (const ev of ['failover', 'failover-start', 'server-lost', 'exhausted']) {
+    for (const ev of ['failover', 'failover-start', 'server-lost', 'exhausted', 'handler-error']) {
       pool.on(ev, (payload) => this.emit(ev, payload));
     }
   }
@@ -141,11 +141,12 @@ export class Cascan extends EventEmitter {
   }
 
   /**
-   * Watch an address. The callback fires on every status change — including
-   * changes that happen while the pool is failing over to a new server.
+   * Watch an address. Changed state observed during live operation, failover,
+   * or a liveness re-query enters acknowledged delivery. Under callback
+   * backpressure, only the newest not-yet-started state is retained.
    *
    * @param {string} address
-   * @param {(status: string|null) => void} cb
+   * @param {(status: string|null, event: object) => void|Promise<void>} cb
    * @returns {Promise<() => void>} unsubscribe
    */
   async watch(address, cb) {
@@ -191,6 +192,11 @@ export class Cascan extends EventEmitter {
  *   allowInsecureTransport?: boolean, — explicit non-payment escape hatch;
  *                                      requires verify:false
  *   timeoutMs?: number,
+ *   subscriptionCheckMs?: number,
+ *   subscriptionCheckBatchSize?: number,
+ *   handlerRetryBaseMs?: number,
+ *   handlerRetryMaxMs?: number,
+ *   handlerTimeoutMs?: number,
  *   cachePath?: string,
  *   onLog?: (m: string) => void,
  * }} [opts]
@@ -210,6 +216,11 @@ export async function connect(opts = {}) {
   const pool = new ServerPool(servers, {
     network,
     timeoutMs: opts.timeoutMs,
+    subscriptionCheckMs: opts.subscriptionCheckMs,
+    subscriptionCheckBatchSize: opts.subscriptionCheckBatchSize,
+    handlerRetryBaseMs: opts.handlerRetryBaseMs,
+    handlerRetryMaxMs: opts.handlerRetryMaxMs,
+    handlerTimeoutMs: opts.handlerTimeoutMs,
     allowInsecureTransport: opts.allowInsecureTransport,
   });
   const bch = new Cascan(pool, { ...opts, network });

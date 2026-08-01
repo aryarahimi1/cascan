@@ -5,11 +5,10 @@
  * best-scoring server, transparent failover when it dies, and
  * subscriptions that RESURRECT on the replacement server.
  *
- * The resurrection detail that makes `watch` safe: for every subscribed
- * address the pool remembers the last status hash the old server reported.
- * After failover it resubscribes on the new server, and if the returned
- * status differs — something happened during the gap — the callback fires
- * immediately. A payment that lands mid-failover is delivered, not lost.
+ * The resurrection detail behind `watch`: for every subscription the pool
+ * tracks upstream observation separately from callback acknowledgement.
+ * After failover it resubscribes on the new server; a changed state enters
+ * the same acknowledged, retryable delivery path as a live notification.
  *
  * Failure ladder (honesty preserved):
  *   one request fails      → retried on the next-ranked server, failure
@@ -29,8 +28,15 @@ import { newHealth, recordSuccess, recordFailure, recordHeight, rankServers } fr
 import { requireAllowedTransport, serverName } from './transport.js';
 import { isValidBchHeight, isValidElectrumAddressStatus } from '../validation.js';
 import { getNetwork } from '../networks.js';
+import {
+  SubscriptionDelivery,
+  MAX_SUBSCRIPTION_TIMER_MS,
+  normalizeSubscriptionDeliveryOptions,
+} from '../subscriptions/delivery.js';
 
 const KEEPALIVE_MS = 45_000;
+const SUBSCRIPTION_CHECK_MS = 30_000;
+const SUBSCRIPTION_CHECK_BATCH = 32;
 
 export class ServerPool extends EventEmitter {
   /**
@@ -38,6 +44,9 @@ export class ServerPool extends EventEmitter {
    *        health?, ... }) or curated entries ({ host, ports: { ssl, tcp } })
    * @param {{ network?: 'mainnet'|'chipnet'|'testnet4',
    *           timeoutMs?: number, keepaliveMs?: number,
+   *           subscriptionCheckMs?: number, subscriptionCheckBatchSize?: number,
+   *           handlerRetryBaseMs?: number, handlerRetryMaxMs?: number,
+   *           handlerTimeoutMs?: number,
    *           allowInsecureTransport?: boolean,
    *           clientFactory?: (server: object) => object }} [opts]
    */
@@ -52,6 +61,19 @@ export class ServerPool extends EventEmitter {
     this.allowInsecureTransport = opts.allowInsecureTransport === true;
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     this.keepaliveMs = opts.keepaliveMs ?? KEEPALIVE_MS;
+    this.subscriptionCheckMs = opts.subscriptionCheckMs ?? SUBSCRIPTION_CHECK_MS;
+    this.subscriptionCheckBatchSize = opts.subscriptionCheckBatchSize ?? SUBSCRIPTION_CHECK_BATCH;
+    if (!Number.isInteger(this.subscriptionCheckMs) || this.subscriptionCheckMs < 1 || this.subscriptionCheckMs > MAX_SUBSCRIPTION_TIMER_MS) {
+      throw new RangeError(`subscriptionCheckMs must be an integer from 1 to ${MAX_SUBSCRIPTION_TIMER_MS}`);
+    }
+    if (!Number.isInteger(this.subscriptionCheckBatchSize) || this.subscriptionCheckBatchSize < 1 || this.subscriptionCheckBatchSize > 256) {
+      throw new RangeError('subscriptionCheckBatchSize must be an integer from 1 to 256');
+    }
+    this._deliveryOptions = normalizeSubscriptionDeliveryOptions({
+      retryBaseMs: opts.handlerRetryBaseMs,
+      retryMaxMs: opts.handlerRetryMaxMs,
+      handlerTimeoutMs: opts.handlerTimeoutMs,
+    });
     this._clientFactory = opts.clientFactory ?? ((server) => {
       const target = requireAllowedTransport(server, {
         allowInsecureTransport: this.allowInsecureTransport,
@@ -69,9 +91,17 @@ export class ServerPool extends EventEmitter {
     this._client = null;
     this._current = null;       // server record backing _client
     this._connecting = null;    // in-flight connect promise (serializes failover)
-    this._subs = new Map();     // address → { cbs: Set<fn>, lastStatus: string|null }
-    this._txSubs = new Map();   // txid → { cbs: Set<fn>, lastHeight: number|null }
+    this._subs = new Map();     // address → observed + acknowledged delivery state
+    this._txSubs = new Map();   // txid → observed + acknowledged delivery state
     this._keepalive = null;
+    this._subscriptionCheck = null;
+    this._subscriptionCheckCursor = 0;
+    this._subscriptionCheckInFlight = false;
+    this._subscriptionCheckGeneration = 0;
+    this._restoring = false;
+    this._stagedAddressStatuses = new Map();
+    this._stagedTransactionHeights = new Map();
+    this._restoreError = null;
     this._closed = false;
   }
 
@@ -106,6 +136,7 @@ export class ServerPool extends EventEmitter {
     for (const server of this.ranked()) {
       if (exclude.has(serverName(server))) continue;
       let client;
+      let activated = false;
       const t0 = Date.now();
       try {
         // Enforce the transport policy before even a custom factory can dial.
@@ -118,16 +149,18 @@ export class ServerPool extends EventEmitter {
         const c = client;
         c._socket?.once('close', () => {
           if (this._closed) return;
-          if (this._client === c) {
-            this._failover('connection closed').catch(() => { /* exhausted → emitted */ });
-          } else {
+          if (!activated) {
             closedDuringSetup = true;
+          } else if (this._client === c) {
+            this._failover('connection closed').catch(() => { /* exhausted → emitted */ });
           }
         });
         // Security boundary: this exact live socket cannot become active until
         // it proves the selected BCH network's fork checkpoints.
         await verifyBchChain(client, this.network);
-        client.onNotification((method, params) => this._onNotify(method, params));
+        client.onNotification((method, params) => {
+          if (this._client === client) this._onNotify(method, params);
+        });
         // Height tracking also warms the header subscription. Setup errors are
         // not optional: a socket that died after its proof must never become
         // the active client.
@@ -143,13 +176,28 @@ export class ServerPool extends EventEmitter {
         this._current = server;
         if (tip?.height != null) recordHeight(server.health, tip.height);
 
-        this._startKeepalive();
-        await this._resubscribeAll();
-        if (closedDuringSetup || !client.connected) {
-          const err = new Error('connection closed during verified pool setup');
-          err.kind = 'transport';
-          throw err;
+        this._restoring = true;
+        this._stagedAddressStatuses.clear();
+        this._stagedTransactionHeights.clear();
+        this._restoreError = null;
+        try {
+          const restored = await this._resubscribeAll();
+          if (this._restoreError) throw this._restoreError;
+          if (closedDuringSetup || !client.connected) {
+            const err = new Error('connection closed during verified pool setup');
+            err.kind = 'transport';
+            throw err;
+          }
+          this._commitRestoredSubscriptions(restored);
+        } finally {
+          this._restoring = false;
+          this._stagedAddressStatuses.clear();
+          this._stagedTransactionHeights.clear();
+          this._restoreError = null;
         }
+        activated = true;
+        this._startKeepalive();
+        this._startSubscriptionChecks();
 
         if (previous && previous !== this.current) {
           this.emit('failover', { from: previous, to: this.current, reason: 'reconnect' });
@@ -158,12 +206,13 @@ export class ServerPool extends EventEmitter {
       } catch (err) {
         recordFailure(server.health);
         errors.push(err);
-        client?.close();
         if (this._client === client) {
           this._stopKeepalive();
+          this._stopSubscriptionChecks();
           this._client = null;
           this._current = null;
         }
+        client?.close();
         this.emit('server-lost', { server: `${server.host}`, error: err.message });
       }
     }
@@ -185,6 +234,7 @@ export class ServerPool extends EventEmitter {
 
   _teardownClient() {
     this._stopKeepalive();
+    this._stopSubscriptionChecks();
     if (this._client) {
       const c = this._client;
       this._client = null;
@@ -231,54 +281,122 @@ export class ServerPool extends EventEmitter {
     return this._client?.connected === true;
   }
 
+  _newDelivery(type, key, onDelivered) {
+    return new SubscriptionDelivery({
+      type,
+      key,
+      ...this._deliveryOptions,
+      onDelivered,
+      onHandlerError: payload => this.emit('handler-error', payload),
+    });
+  }
+
+  _newAddressEntry(address) {
+    const entry = {
+      initialized: false,
+      observedStatus: null,
+      deliveredStatus: null,
+      initializing: null,
+      pendingInitial: null,
+      delivery: null,
+    };
+    entry.delivery = this._newDelivery('address-status', address, value => {
+      entry.deliveredStatus = value;
+    });
+    return entry;
+  }
+
+  _newTransactionEntry(txid) {
+    const entry = {
+      initialized: false,
+      observedHeight: null,
+      deliveredHeight: null,
+      initializing: null,
+      pendingInitial: null,
+      delivery: null,
+    };
+    entry.delivery = this._newDelivery('transaction-height', txid, value => {
+      entry.deliveredHeight = value;
+    });
+    return entry;
+  }
+
+  _observeAddress(entry, status, source) {
+    if (!entry.initialized || Object.is(status, entry.observedStatus)) return null;
+    entry.observedStatus = status;
+    return entry.delivery.observe(status, source);
+  }
+
+  _observeTransaction(entry, height, source) {
+    if (!entry.initialized || Object.is(height, entry.observedHeight)) return null;
+    entry.observedHeight = height;
+    return entry.delivery.observe(height, source);
+  }
+
   /**
    * Subscribe to an address. Survives failover: resubscribed automatically,
    * and a status change that happened during the gap fires cb immediately.
    *
    * @param {string} address — cashaddr
-   * @param {(status: string|null) => void} cb
+   * @param {(status: string|null, event: object) => void|Promise<void>} cb
    * @returns {Promise<string|null>} current status hash
    */
   async subscribeAddress(address, cb) {
+    if (typeof cb !== 'function') throw new TypeError('subscription callback must be a function');
     let entry = this._subs.get(address);
     if (!entry) {
       // `initialized: false` keeps _resubscribeAll from touching this entry
       // until the initial subscribe below establishes the status baseline —
       // otherwise a concurrent failover would fire cb with the FIRST status
       // as if it were a change.
-      entry = { cbs: new Set(), lastStatus: null, initialized: false };
+      entry = this._newAddressEntry(address);
       this._subs.set(address, entry);
     }
-    entry.cbs.add(cb);
-    if (entry.initialized) return entry.lastStatus;
+    entry.delivery.add(cb);
+    if (entry.initialized) return entry.observedStatus;
 
-    // Failover-aware initial subscribe: a server death here retries on the
-    // next-ranked server instead of surfacing a transport error.
+    // Concurrent subscribers share one baseline request. Otherwise a status
+    // change between two initial requests could be silently installed as a
+    // second baseline instead of delivered as a change.
+    if (!entry.initializing) {
+      entry.initializing = this._initializeAddress(address, entry)
+        .finally(() => { entry.initializing = null; });
+    }
     try {
-      const maxAttempts = Math.max(1, this.servers.length);
-      const excluded = new Set();
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const status = await this.request('blockchain.address.subscribe', [address]);
-        if (isValidElectrumAddressStatus(status)) {
-          entry.lastStatus = status;
-          entry.initialized = true;
-          return entry.lastStatus;
-        }
-        if (attempt < maxAttempts - 1) {
-          // A malformed subscription response is a hostile server answer,
-          // not an application-level failure the caller should absorb.
-          if (this.current) excluded.add(this.current);
-          await this._failover('invalid address subscription status', {
-            exclude: excluded,
-          });
-          continue;
-        }
-        throw new TypeError('server returned an invalid Electrum address status');
-      }
+      return await entry.initializing;
     } catch (err) {
-      entry.cbs.delete(cb);
-      if (entry.cbs.size === 0) this._subs.delete(address);
+      entry.delivery.delete(cb);
+      if (entry.delivery.size === 0) {
+        entry.delivery.close();
+        this._subs.delete(address);
+      }
       throw err;
+    }
+  }
+
+  async _initializeAddress(address, entry) {
+    const maxAttempts = Math.max(1, this.servers.length);
+    const excluded = new Set();
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const status = await this.request('blockchain.address.subscribe', [address]);
+      if (isValidElectrumAddressStatus(status)) {
+        entry.observedStatus = status;
+        entry.deliveredStatus = status;
+        entry.delivery.setBaseline(status);
+        entry.initialized = true;
+        const pending = entry.pendingInitial;
+        entry.pendingInitial = null;
+        if (pending?.client === this._client) {
+          this._observeAddress(entry, pending.value, 'notification');
+        }
+        return entry.observedStatus;
+      }
+      if (attempt < maxAttempts - 1) {
+        if (this.current) excluded.add(this.current);
+        await this._failover('invalid address subscription status', { exclude: excluded });
+        continue;
+      }
+      throw new TypeError('server returned an invalid Electrum address status');
     }
   }
 
@@ -301,8 +419,9 @@ export class ServerPool extends EventEmitter {
   unsubscribeAddress(address, cb) {
     const entry = this._subs.get(address);
     if (!entry) return;
-    entry.cbs.delete(cb);
-    if (entry.cbs.size === 0) {
+    entry.delivery.delete(cb);
+    if (entry.delivery.size === 0) {
+      entry.delivery.close();
       this._subs.delete(address);
       // Fulcrum protocol 1.4+: unsubscribe is best-effort.
       this._client?.request('blockchain.address.unsubscribe', [address]).catch(() => {});
@@ -314,41 +433,59 @@ export class ServerPool extends EventEmitter {
    * Same resurrection contract as subscribeAddress.
    *
    * @param {string} txid
-   * @param {(height: number|null) => void} cb
+   * @param {(height: number|null, event: object) => void|Promise<void>} cb
    * @returns {Promise<number|null>} current height (0/null = unconfirmed)
    */
   async subscribeTransaction(txid, cb) {
+    if (typeof cb !== 'function') throw new TypeError('subscription callback must be a function');
     let entry = this._txSubs.get(txid);
     if (!entry) {
-      entry = { cbs: new Set(), lastHeight: null, initialized: false };
+      entry = this._newTransactionEntry(txid);
       this._txSubs.set(txid, entry);
     }
-    entry.cbs.add(cb);
-    if (entry.initialized) return entry.lastHeight;
+    entry.delivery.add(cb);
+    if (entry.initialized) return entry.observedHeight;
 
+    if (!entry.initializing) {
+      entry.initializing = this._initializeTransaction(txid, entry)
+        .finally(() => { entry.initializing = null; });
+    }
     try {
-      const maxAttempts = Math.max(1, this.servers.length);
-      const excluded = new Set();
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const height = await this.request('blockchain.transaction.subscribe', [txid]);
-        if (isValidOptionalBchHeight(height)) {
-          entry.lastHeight = height ?? null;
-          entry.initialized = true;
-          return entry.lastHeight;
-        }
-        if (attempt < maxAttempts - 1) {
-          if (this.current) excluded.add(this.current);
-          await this._failover('invalid transaction subscription height', {
-            exclude: excluded,
-          });
-          continue;
-        }
-        throw new TypeError('server returned an invalid BCH transaction height');
-      }
+      return await entry.initializing;
     } catch (err) {
-      entry.cbs.delete(cb);
-      if (entry.cbs.size === 0) this._txSubs.delete(txid);
+      entry.delivery.delete(cb);
+      if (entry.delivery.size === 0) {
+        entry.delivery.close();
+        this._txSubs.delete(txid);
+      }
       throw err;
+    }
+  }
+
+  async _initializeTransaction(txid, entry) {
+    const maxAttempts = Math.max(1, this.servers.length);
+    const excluded = new Set();
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const height = await this.request('blockchain.transaction.subscribe', [txid]);
+      if (isValidOptionalBchHeight(height)) {
+        const baseline = height ?? null;
+        entry.observedHeight = baseline;
+        entry.deliveredHeight = baseline;
+        entry.delivery.setBaseline(baseline);
+        entry.initialized = true;
+        const pending = entry.pendingInitial;
+        entry.pendingInitial = null;
+        if (pending?.client === this._client) {
+          this._observeTransaction(entry, pending.value, 'notification');
+        }
+        return entry.observedHeight;
+      }
+      if (attempt < maxAttempts - 1) {
+        if (this.current) excluded.add(this.current);
+        await this._failover('invalid transaction subscription height', { exclude: excluded });
+        continue;
+      }
+      throw new TypeError('server returned an invalid BCH transaction height');
     }
   }
 
@@ -356,8 +493,9 @@ export class ServerPool extends EventEmitter {
   unsubscribeTransaction(txid, cb) {
     const entry = this._txSubs.get(txid);
     if (!entry) return;
-    entry.cbs.delete(cb);
-    if (entry.cbs.size === 0) {
+    entry.delivery.delete(cb);
+    if (entry.delivery.size === 0) {
+      entry.delivery.close();
       this._txSubs.delete(txid);
       this._client?.request('blockchain.transaction.unsubscribe', [txid]).catch(() => {});
     }
@@ -372,7 +510,7 @@ export class ServerPool extends EventEmitter {
         throw new TypeError('server returned an invalid Electrum address status');
       }
       const fresh = status;
-      if (fresh !== entry.lastStatus) addressChanges.push({ entry, fresh });
+      if (fresh !== entry.observedStatus) addressChanges.push({ entry, fresh });
     }
 
     const txChanges = [];
@@ -383,22 +521,41 @@ export class ServerPool extends EventEmitter {
         throw new TypeError('server returned an invalid BCH transaction height');
       }
       const fresh = height ?? null;
-      if (fresh !== entry.lastHeight) txChanges.push({ entry, fresh });
+      if (fresh !== entry.observedHeight) txChanges.push({ entry, fresh });
     }
 
-    // Commit only after every subscription is live. A partial restore must
-    // fail the candidate connection, otherwise watch consumers can remain
-    // silently blind while keepalive pings continue to succeed.
+    return { addressChanges, txChanges };
+  }
+
+  // Commit only after every subscription is live and the candidate socket is
+  // still healthy. Notifications received during restoration are staged, so
+  // no callback can escape from a candidate rejected later in setup.
+  _commitRestoredSubscriptions({ addressChanges, txChanges }) {
+    const changedAddressEntries = new Set(addressChanges.map(change => change.entry));
+    const changedTransactionEntries = new Set(txChanges.map(change => change.entry));
     for (const { entry, fresh } of addressChanges) {
-      entry.lastStatus = fresh;
-      for (const cb of entry.cbs) {
-        try { cb(fresh); } catch { /* userland */ }
-      }
+      const finalStatus = this._stagedAddressStatuses.has(entry)
+        ? this._stagedAddressStatuses.get(entry)
+        : fresh;
+      this._observeAddress(entry, finalStatus, 'resubscribe');
     }
     for (const { entry, fresh } of txChanges) {
-      entry.lastHeight = fresh;
-      for (const cb of entry.cbs) {
-        try { cb(fresh); } catch { /* userland */ }
+      const finalHeight = this._stagedTransactionHeights.has(entry)
+        ? this._stagedTransactionHeights.get(entry)
+        : fresh;
+      this._observeTransaction(entry, finalHeight, 'resubscribe');
+    }
+
+    // A staged notification may carry a change even when the synchronous
+    // subscribe response matched the previous observation.
+    for (const [entry, status] of this._stagedAddressStatuses) {
+      if (!changedAddressEntries.has(entry)) {
+        this._observeAddress(entry, status, 'resubscribe');
+      }
+    }
+    for (const [entry, height] of this._stagedTransactionHeights) {
+      if (!changedTransactionEntries.has(entry)) {
+        this._observeTransaction(entry, height, 'resubscribe');
       }
     }
   }
@@ -409,29 +566,49 @@ export class ServerPool extends EventEmitter {
       const entry = this._subs.get(address);
       if (!entry) return;
       if (!isValidElectrumAddressStatus(status)) {
+        if (this._restoring) {
+          this._restoreError = new TypeError('server returned an invalid Electrum address status during restoration');
+          this._client?.close();
+          return;
+        }
         this._failover('invalid address subscription status', {
           exclude: new Set(this.current ? [this.current] : []),
         }).catch(() => {});
         return;
       }
-      entry.lastStatus = status;
-      for (const cb of entry.cbs) {
-        try { cb(entry.lastStatus); } catch { /* userland */ }
+      if (!entry.initialized) {
+        entry.pendingInitial = { client: this._client, value: status };
+        return;
       }
+      if (this._restoring) {
+        this._stagedAddressStatuses.set(entry, status);
+        return;
+      }
+      this._observeAddress(entry, status, 'notification');
     } else if (method === 'blockchain.transaction.subscribe') {
       const [txid, height] = params ?? [];
       const entry = this._txSubs.get(txid);
       if (!entry) return;
       if (!isValidOptionalBchHeight(height)) {
+        if (this._restoring) {
+          this._restoreError = new TypeError('server returned an invalid BCH transaction height during restoration');
+          this._client?.close();
+          return;
+        }
         this._failover('invalid transaction subscription height', {
           exclude: new Set(this.current ? [this.current] : []),
         }).catch(() => {});
         return;
       }
-      entry.lastHeight = height ?? null;
-      for (const cb of entry.cbs) {
-        try { cb(entry.lastHeight); } catch { /* userland */ }
+      if (!entry.initialized) {
+        entry.pendingInitial = { client: this._client, value: height ?? null };
+        return;
       }
+      if (this._restoring) {
+        this._stagedTransactionHeights.set(entry, height ?? null);
+        return;
+      }
+      this._observeTransaction(entry, height ?? null, 'notification');
     } else if (method === 'blockchain.headers.subscribe') {
       const tip = Array.isArray(params) ? params[0] : params;
       if (isValidBchHeight(tip?.height) && this._current) {
@@ -439,6 +616,76 @@ export class ServerPool extends EventEmitter {
         this.emit('block', { height: tip.height, hex: tip.hex ?? null });
       }
     }
+  }
+
+  _startSubscriptionChecks() {
+    this._stopSubscriptionChecks();
+    const generation = this._subscriptionCheckGeneration;
+    this._subscriptionCheck = setInterval(() => {
+      if (this._subscriptionCheckInFlight || this._closed) return;
+      this._subscriptionCheckInFlight = true;
+      this._checkSubscriptionBatch()
+        .catch(() => { /* failover/exhausted is emitted by the pool */ })
+        .finally(() => {
+          if (this._subscriptionCheckGeneration === generation) {
+            this._subscriptionCheckInFlight = false;
+          }
+        });
+    }, this.subscriptionCheckMs);
+    this._subscriptionCheck.unref?.();
+  }
+
+  async _checkSubscriptionBatch() {
+    const client = this._client;
+    if (!client?.connected) return;
+    const subscriptions = [
+      ...[...this._subs.entries()]
+        .filter(([, entry]) => entry.initialized)
+        .map(([key, entry]) => ({ kind: 'address', key, entry })),
+      ...[...this._txSubs.entries()]
+        .filter(([, entry]) => entry.initialized)
+        .map(([key, entry]) => ({ kind: 'transaction', key, entry })),
+    ];
+    if (subscriptions.length === 0) return;
+
+    const count = Math.min(this.subscriptionCheckBatchSize, subscriptions.length);
+    for (let offset = 0; offset < count; offset++) {
+      if (this._client !== client || !client.connected || this._closed) return;
+      const index = (this._subscriptionCheckCursor + offset) % subscriptions.length;
+      const item = subscriptions[index];
+      try {
+        if (item.kind === 'address') {
+          const status = await client.request('blockchain.address.subscribe', [item.key]);
+          if (!isValidElectrumAddressStatus(status)) {
+            throw new TypeError('server returned an invalid Electrum address status during liveness check');
+          }
+          if (this._client === client) this._observeAddress(item.entry, status, 'liveness-check');
+        } else {
+          const height = await client.request('blockchain.transaction.subscribe', [item.key]);
+          if (!isValidOptionalBchHeight(height)) {
+            throw new TypeError('server returned an invalid BCH transaction height during liveness check');
+          }
+          if (this._client === client) this._observeTransaction(item.entry, height ?? null, 'liveness-check');
+        }
+      } catch (error) {
+        if (this._client === client && !this._closed) {
+          await this._failover(`subscription liveness check failed: ${error?.message ?? String(error)}`, {
+            exclude: new Set(this.current ? [this.current] : []),
+          });
+        }
+        return;
+      }
+    }
+    this._subscriptionCheckCursor = (this._subscriptionCheckCursor + count) % subscriptions.length;
+  }
+
+  _stopSubscriptionChecks() {
+    this._subscriptionCheckGeneration++;
+    if (this._subscriptionCheck) {
+      clearInterval(this._subscriptionCheck);
+      this._subscriptionCheck = null;
+    }
+    this._subscriptionCheckInFlight = false;
   }
 
   _startKeepalive() {
@@ -469,6 +716,8 @@ export class ServerPool extends EventEmitter {
 
   close() {
     this._closed = true;
+    for (const entry of this._subs.values()) entry.delivery.close();
+    for (const entry of this._txSubs.values()) entry.delivery.close();
     this._subs.clear();
     this._txSubs.clear();
     this._teardownClient();

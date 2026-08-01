@@ -173,6 +173,9 @@ export async function defaultQuorumEntries(opts = {}) {
  *
  * @param {{ servers?: Array, network?: 'mainnet'|'chipnet'|'testnet4',
  *           timeoutMs?: number, allowInsecureTransport?: boolean,
+ *           subscriptionCheckMs?: number, subscriptionCheckBatchSize?: number,
+ *           handlerRetryBaseMs?: number, handlerRetryMaxMs?: number,
+ *           handlerTimeoutMs?: number,
  *           onLog?: (m) => void }} [opts]
  * @returns {Promise<{ pool: ServerPool, server: string }>}
  */
@@ -186,6 +189,11 @@ export async function connectPool(opts = {}) {
     network: opts.network,
     timeoutMs: opts.timeoutMs,
     allowInsecureTransport: opts.allowInsecureTransport,
+    subscriptionCheckMs: opts.subscriptionCheckMs,
+    subscriptionCheckBatchSize: opts.subscriptionCheckBatchSize,
+    handlerRetryBaseMs: opts.handlerRetryBaseMs,
+    handlerRetryMaxMs: opts.handlerRetryMaxMs,
+    handlerTimeoutMs: opts.handlerTimeoutMs,
   });
   await pool.acquire();
   return { pool, server: pool.current };

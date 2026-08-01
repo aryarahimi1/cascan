@@ -133,6 +133,11 @@ export async function connect(opts = {}) {
     network: network.name,
     timeoutMs,
     keepaliveMs,
+    subscriptionCheckMs: opts.subscriptionCheckMs,
+    subscriptionCheckBatchSize: opts.subscriptionCheckBatchSize,
+    handlerRetryBaseMs: opts.handlerRetryBaseMs,
+    handlerRetryMaxMs: opts.handlerRetryMaxMs,
+    handlerTimeoutMs: opts.handlerTimeoutMs,
   });
   const cascan = new BrowserCascan(pool, { network: network.name });
   await pool.acquire();

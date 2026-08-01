@@ -184,9 +184,10 @@ export async function cmdWatch(parsed) {
     // hid a renderer bug that dropped 0-conf payments (security review).
     // Pool-managed: survives failover, and a status change that happened
     // during the gap fires this callback immediately after resubscription.
-    await pool.subscribeAddress(rec.cashaddr, () => {
-      onChange().catch(err => process.stderr.write(`! watch handler error: ${err?.message ?? err}\n`));
+    pool.on('handler-error', event => {
+      process.stderr.write(`! watch handler error (${event.eventId}, retry ${event.attempt}): ${event.error}\n`);
     });
+    await pool.subscribeAddress(rec.cashaddr, () => onChange());
 
     // Lifecycle: the pool owns keepalive + failover. The watch ends on
     // Ctrl+C (exit 0) or when the ENTIRE pool is unreachable (exit 2) —
