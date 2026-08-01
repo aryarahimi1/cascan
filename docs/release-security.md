@@ -18,7 +18,9 @@ the library production-ready by itself.
    one-time namespace bootstrap from a reviewed, clean, annotated prerelease
    tag using `npm publish --access public --tag next`. This direct publish is an
    operator action requiring npm authentication and 2FA; it is intentionally
-   not automated by this repository. Never bootstrap a stable `latest` release.
+   not automated by this repository. The tag workflow explicitly excludes only
+   `v0.4.0-beta.0` so that pushing this bootstrap tag cannot create a doomed or
+   duplicate staged-publish run. Never bootstrap a stable `latest` release.
 5. In npm package settings, configure the GitHub Actions trusted publisher for
    repository `aryarahimi1/cascan` and workflow
    `.github/workflows/stage-npm-release.yml`. Permit staged publishing, not

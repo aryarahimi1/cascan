@@ -37,6 +37,7 @@ test('README does not advertise an unverified public install path', () => {
 test('release workflow uses pinned actions, OIDC, staging, and no npm token', () => {
   const workflow = read('../.github/workflows/stage-npm-release.yml');
   assert.match(workflow, /tags:\s*\n\s*- 'v\*'/);
+  assert.match(workflow, /- '!v0\.4\.0-beta\.0'/);
   assert.match(workflow, /actions\/checkout@[0-9a-f]{40}/);
   assert.match(workflow, /actions\/setup-node@[0-9a-f]{40}/);
   assert.match(workflow, /id-token: write/);

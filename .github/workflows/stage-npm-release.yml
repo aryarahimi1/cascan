@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - 'v*'
+      # npm cannot stage a package before its namespace exists. This one
+      # reviewed bootstrap tag is published directly with maintainer 2FA;
+      # every later version must use the staged OIDC path below.
+      - '!v0.4.0-beta.0'
 
 permissions:
   contents: read
