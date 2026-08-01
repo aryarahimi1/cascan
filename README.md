@@ -22,7 +22,7 @@ automatic WSS bootstrapping, failover, and subscription restoration.
 Your app stops dying when a server dies — in ten lines:
 
 ```js
-import { connect } from 'cascan';
+import { connect } from '@aryarh/cascan';
 
 const bch = await connect();                       // DNS seed + gossip + probing; curated fallback
 const address = 'bitcoincash:qr7f…';
@@ -101,7 +101,7 @@ each server's BCH fork checkpoints, health-ranks the healthy servers, fails
 over, and restores address subscriptions:
 
 ```js
-import { connect } from 'cascan/browser';
+import { connect } from '@aryarh/cascan/browser';
 
 const bch = await connect();
 
@@ -148,7 +148,7 @@ CashScript's default `ElectrumNetworkProvider` is a single hardcoded
 server with no fallback — its own docs say so. Swap it:
 
 ```js
-import { connect, CascanNetworkProvider } from 'cascan';
+import { connect, CascanNetworkProvider } from '@aryarh/cascan';
 
 const provider = new CascanNetworkProvider(await connect());
 const contract = new Contract(artifact, args, { provider }); // unchanged
@@ -157,7 +157,7 @@ const contract = new Contract(artifact, args, { provider }); // unchanged
 ### mainnet-js too
 
 ```js
-import { connect, CascanMainnetProvider } from 'cascan';
+import { connect, CascanMainnetProvider } from '@aryarh/cascan';
 const provider = new CascanMainnetProvider(await connect());
 ```
 
@@ -207,7 +207,7 @@ cascan schema
 ## Install
 
 No official npm release has been published yet. Until this README links to a
-specific registry version, packages using the `cascan` name are not official.
+specific registry version, packages claiming to be cascan are not official.
 
 To evaluate a reviewed checkout during development:
 

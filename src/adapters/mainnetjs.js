@@ -4,7 +4,7 @@
  * Drop-in mainnet-js NetworkProvider backed by cascan's reliability layer.
  *
  *   import { Wallet } from 'mainnet-js';
- *   import { connect, CascanMainnetProvider } from 'cascan';
+ *   import { connect, CascanMainnetProvider } from '@aryarh/cascan';
  *
  *   const provider = new CascanMainnetProvider(await connect());
  *   // pass wherever mainnet-js accepts a NetworkProvider

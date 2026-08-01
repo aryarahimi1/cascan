@@ -4,11 +4,16 @@ import { readFile } from 'node:fs/promises';
 
 const expectedRepository = 'git+https://github.com/aryarahimi1/cascan.git';
 const expectedRegistry = 'https://registry.npmjs.org/';
+const expectedName = '@aryarh/cascan';
 const packageJson = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8'),
 );
 const tag = process.argv[2] ?? process.env.GITHUB_REF_NAME;
 const errors = [];
+
+if (packageJson.name !== expectedName) {
+  errors.push(`package name must be exactly ${expectedName}`);
+}
 
 if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(packageJson.version)) {
   errors.push(`package version is not valid release semver: ${packageJson.version}`);

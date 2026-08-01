@@ -8,9 +8,9 @@ the library production-ready by itself.
 
 1. Create or recover the maintainer's npm account and enable account-level 2FA.
    Store recovery codes offline.
-2. While authenticated, verify that `cascan` is still available. If it is not,
-   stop and choose a scoped package name controlled by the maintainer; never
-   install or overwrite an unrelated package merely because the name matches.
+2. Use only the maintainer-controlled npm package `@aryarh/cascan`. npm rejected
+   the unscoped `cascan` name as too similar to an existing package; never work
+   around that protection or publish under an unrelated account.
 3. Make the GitHub repository public before relying on npm provenance. The
    package metadata already points to `aryarahimi1/cascan`, and that URL must
    continue to match exactly.
@@ -19,10 +19,11 @@ the library production-ready by itself.
    tag using `npm publish --access public --tag next`. This direct publish is an
    operator action requiring npm authentication and 2FA; it is intentionally
    not automated by this repository. The tag workflow explicitly excludes only
-   `v0.4.0-beta.0` so that pushing this bootstrap tag cannot create a doomed or
-   duplicate staged-publish run. Never bootstrap a stable `latest` release.
-5. In npm package settings, configure the GitHub Actions trusted publisher for
-   repository `aryarahimi1/cascan` and workflow
+   `v0.4.0-beta.0` and `v0.4.0-beta.1` so neither the rejected unscoped attempt
+   nor the reviewed scoped bootstrap can create a doomed or duplicate staged-
+   publish run. Never bootstrap a stable `latest` release.
+5. In npm package settings for `@aryarh/cascan`, configure the GitHub Actions
+   trusted publisher for repository `aryarahimi1/cascan` and workflow
    `.github/workflows/stage-npm-release.yml`. Permit staged publishing, not
    direct publishing.
 6. Require 2FA for package settings and publishing and disallow reusable write

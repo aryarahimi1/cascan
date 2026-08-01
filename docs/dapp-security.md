@@ -18,7 +18,7 @@ and `height()`:
   endpoints.
 
 ```js
-import { connect } from 'cascan';
+import { connect } from '@aryarh/cascan';
 
 const bch = await connect();
 const balance = await bch.balance(address);

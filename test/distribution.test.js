@@ -27,6 +27,7 @@ test('public tree excludes disabled installers and internal working material', (
 test('README does not advertise an unverified public install path', () => {
   const readme = read('../README.md');
   assert.doesNotMatch(readme, /npm install -g cascan/);
+  assert.doesNotMatch(readme, /npm (?:install|i).*@aryarh\/cascan/);
   assert.doesNotMatch(readme, /raw\.githubusercontent\.com.*install\.sh/);
   assert.doesNotMatch(readme, /brew install.*cascan\.rb/);
   assert.doesNotMatch(readme, /Never trust one server again/);
@@ -38,6 +39,7 @@ test('release workflow uses pinned actions, OIDC, staging, and no npm token', ()
   const workflow = read('../.github/workflows/stage-npm-release.yml');
   assert.match(workflow, /tags:\s*\n\s*- 'v\*'/);
   assert.match(workflow, /- '!v0\.4\.0-beta\.0'/);
+  assert.match(workflow, /- '!v0\.4\.0-beta\.1'/);
   assert.match(workflow, /actions\/checkout@[0-9a-f]{40}/);
   assert.match(workflow, /actions\/setup-node@[0-9a-f]{40}/);
   assert.match(workflow, /id-token: write/);
@@ -53,6 +55,7 @@ test('release workflow uses pinned actions, OIDC, staging, and no npm token', ()
 
 test('release metadata is pinned to the official public npm registry', () => {
   const packageJson = JSON.parse(read('../package.json'));
+  assert.equal(packageJson.name, '@aryarh/cascan');
   assert.deepEqual(packageJson.publishConfig, {
     access: 'public',
     registry: 'https://registry.npmjs.org/',

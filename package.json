@@ -1,6 +1,6 @@
 {
-  "name": "cascan",
-  "version": "0.4.0-beta.0",
+  "name": "@aryarh/cascan",
+  "version": "0.4.0-beta.1",
   "description": "Bitcoin Cash Fulcrum reliability for Node and browsers: discovery, health scoring, failover, restored subscriptions, and strict Node quorum.",
   "type": "module",
   "main": "src/index.js",

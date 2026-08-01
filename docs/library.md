@@ -3,13 +3,13 @@
 Zero-dependency. Node ≥ 20.10:
 
 ```js
-import { connect } from 'cascan';
+import { connect } from '@aryarh/cascan';
 ```
 
 Browser:
 
 ```js
-import { connect } from 'cascan/browser';
+import { connect } from '@aryarh/cascan/browser';
 ```
 
 ## `connect(options?) → Promise<Cascan>`
@@ -191,7 +191,7 @@ and the residual trust limits.
 ### CashScript
 
 ```js
-import { connect, CascanNetworkProvider } from 'cascan';
+import { connect, CascanNetworkProvider } from '@aryarh/cascan';
 const provider = new CascanNetworkProvider(await connect({ network: 'chipnet' }));
 const contract = new Contract(artifact, args, { provider });
 ```
@@ -207,7 +207,7 @@ raw transaction.
 ### mainnet-js
 
 ```js
-import { connect, CascanMainnetProvider } from 'cascan';
+import { connect, CascanMainnetProvider } from '@aryarh/cascan';
 const provider = new CascanMainnetProvider(await connect());
 ```
 
@@ -235,7 +235,7 @@ valid.
 WebSocket framing is an in-house RFC 6455 client (zero deps):
 
 ```js
-import { FulcrumClient } from 'cascan';
+import { FulcrumClient } from '@aryarh/cascan';
 const c = new FulcrumClient({ host: 'electrum.imaginary.cash', port: 50004, transport: 'wss' });
 ```
 

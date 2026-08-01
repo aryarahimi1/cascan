@@ -1,7 +1,7 @@
 import { getNetwork } from '../networks.js';
 import { requireBchBlockHeaderHex } from '../validation.js';
 
-export const BROWSER_CLIENT_NAME = 'cascan-browser/0.4.0-beta.0';
+export const BROWSER_CLIENT_NAME = 'cascan-browser/0.4.0-beta.1';
 export const BROWSER_PROTOCOL_RANGE = ['1.4', '1.6'];
 
 const MIB = 1024 * 1024;

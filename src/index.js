@@ -3,7 +3,7 @@
  *
  * Public library API (zero dependencies, Node ≥ 20.10):
  *
- *   import { connect } from 'cascan';
+ *   import { connect } from '@aryarh/cascan';
  *
  *   const bch = await connect();                    // discovery + failover on
  *   const bal = await bch.balance('bitcoincash:…'); // survives server death

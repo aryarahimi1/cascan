@@ -8,7 +8,7 @@
  *   const provider = new ElectrumNetworkProvider('mainnet');
  *
  *   // after — discovered pool, health scoring, transparent failover:
- *   import { connect, CascanNetworkProvider } from 'cascan';
+ *   import { connect, CascanNetworkProvider } from '@aryarh/cascan';
  *   const provider = new CascanNetworkProvider(await connect());
  *
  * Implements the standardized interface from
