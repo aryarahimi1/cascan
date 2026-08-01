@@ -212,17 +212,17 @@ cascan schema
 
 ## Install
 
-The reviewed public beta is [`@aryarh/cascan@0.4.0-beta.2`](https://www.npmjs.com/package/@aryarh/cascan/v/0.4.0-beta.2).
+The reviewed public beta is [`@aryarh/cascan@0.4.0-beta.3`](https://www.npmjs.com/package/@aryarh/cascan/v/0.4.0-beta.3).
 Pin the exact prerelease during pilots:
 
 ```sh
-npm install @aryarh/cascan@0.4.0-beta.2
+npm install @aryarh/cascan@0.4.0-beta.3
 ```
 
 For the CLI without a global install:
 
 ```sh
-npx --package=@aryarh/cascan@0.4.0-beta.2 cascan --help
+npx --package=@aryarh/cascan@0.4.0-beta.3 cascan --help
 ```
 
 The unscoped `cascan` package is **not** this project. This remains a beta: do

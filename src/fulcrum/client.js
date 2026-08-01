@@ -125,7 +125,7 @@ export function wsEncodePong(payload) {
   return Buffer.concat([header, mask, masked]);
 }
 
-export const CLIENT_NAME = 'cascan/0.1.0';
+export const CLIENT_NAME = 'cascan/0.4.0-beta.3';
 // Electrum-Cash protocol range. 1.4 is the widely-deployed CashTokens-aware
 // baseline on Fulcrum; we negotiate [1.4, 1.6] and record what we get.
 export const PROTOCOL_RANGE = ['1.4', '1.6'];
