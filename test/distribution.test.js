@@ -60,6 +60,7 @@ test('release metadata is pinned to the official public npm registry', () => {
   assert.equal(packageJson.bin.cascan, 'bin/cascan.js');
   assert.deepEqual(packageJson.dependencies, undefined);
   assert.equal(packageJson.devDependencies['@playwright/test'], '1.62.1');
+  assert.equal(packageJson.scripts.test, 'node --test --test-concurrency=1 test/*.test.js');
   for (const lifecycle of ['preinstall', 'install', 'postinstall', 'prepare']) {
     assert.equal(packageJson.scripts[lifecycle], undefined);
   }
