@@ -47,6 +47,18 @@ const DEFAULTS = {
 
 export { headerHash };
 
+/**
+ * Human-readable probe failure. Node's multi-address connect raises an
+ * AggregateError whose own message is empty; report its member errors.
+ */
+function rejectionReason(err) {
+  if (err?.message) return err.message;
+  if (Array.isArray(err?.errors) && err.errors.length > 0) {
+    return err.errors.map(e => e?.message || e?.code || String(e)).join('; ');
+  }
+  return err?.code ?? String(err);
+}
+
 /** Bounded-concurrency map; failures land as nulls. */
 async function mapLimit(items, limit, fn) {
   const results = new Array(items.length);
@@ -305,7 +317,7 @@ export async function discoverServers(options = {}) {
       try {
         return await probe(cand, opts);
       } catch (err) {
-        rejected.push({ host: cand.host, reason: err?.message ?? String(err) });
+        rejected.push({ host: cand.host, reason: rejectionReason(err) });
         return null;
       }
     });

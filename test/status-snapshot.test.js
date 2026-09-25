@@ -8,6 +8,7 @@ import {
   classifyRejection,
   classifyVerified,
   mergeRun,
+  runnerCannotReach,
   shortReason,
   uptime,
 } from '../scripts/status-lib.mjs';
@@ -22,9 +23,17 @@ test('status: rejections separate unreachable, wrong-chain, and failed handshake
   assert.equal(classifyRejection('connect timeout after 6000ms'), 'D');
   assert.equal(classifyRejection('connect ECONNREFUSED 1.2.3.4:50002'), 'D');
   assert.equal(classifyRejection('no transport available'), 'D');
+  assert.equal(classifyRejection('connect ETIMEDOUT 1.2.3.4:50002; connect ENETUNREACH ::1:50002'), 'D');
   assert.equal(classifyRejection('wrong chain: checkpoint 556767 does not match mainnet'), 'W');
   assert.equal(classifyRejection('server returned a malformed 80-byte block header'), 'X');
   assert.equal(shortReason(`line one\n    at stack (x.js:1)`), 'line one');
+});
+
+test('status: an IPv6 address the runner cannot route to is not a server failure', () => {
+  assert.equal(runnerCannotReach('2604:a880:4:1d0::1', 'connect ENETUNREACH 2604:a880:4:1d0::1:50001 - Local (:::0)'), true);
+  assert.equal(runnerCannotReach('2604:a880:4:1d0::1', 'connect timeout after 6000ms'), false);
+  assert.equal(runnerCannotReach('1.2.3.4', 'connect ENETUNREACH 1.2.3.4:50001'), false);
+  assert.equal(runnerCannotReach('bch.example', 'connect ENETUNREACH'), false);
 });
 
 test('status: runs append samples, mark unprobed hosts, and compute lag from the tip', () => {

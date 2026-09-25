@@ -29,10 +29,18 @@ export function classifyVerified(record) {
 export function classifyRejection(reason) {
   const text = String(reason ?? '');
   if (/wrong chain|checkpoint/i.test(text)) return 'W';
-  if (/timeout|timed out|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EAI_AGAIN|socket hang up|connection closed|no transport available/i.test(text)) {
+  if (/timeout|timed out|ETIMEDOUT|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EAI_AGAIN|socket hang up|connection closed|no transport available/i.test(text)) {
     return 'D';
   }
   return 'X';
+}
+
+/**
+ * True when the probe runner itself cannot route to the address (GitHub
+ * runners have no IPv6), so the failure says nothing about the server.
+ */
+export function runnerCannotReach(host, reason) {
+  return String(host).includes(':') && /ENETUNREACH|EADDRNOTAVAIL/.test(String(reason ?? ''));
 }
 
 /** Short, display-safe rejection text (no stack traces, bounded length). */

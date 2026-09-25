@@ -162,6 +162,20 @@ test('discovery: wrong-chain server rejected with the reason preserved', async (
   assert.match(d.rejected[0].reason, /wrong chain/);
 });
 
+test('discovery: multi-address connect failures keep a readable reason', async () => {
+  const d = await discoverServers({
+    curated: CURATED,
+    dnsResolve: async () => [],
+    probe: async () => {
+      const timeout = Object.assign(new Error('connect ETIMEDOUT 1.2.3.4:50002'), { code: 'ETIMEDOUT' });
+      const unreachable = Object.assign(new Error('connect ENETUNREACH ::1:50002'), { code: 'ENETUNREACH' });
+      throw new AggregateError([timeout, unreachable], '');
+    },
+  });
+  assert.equal(d.rejected.length, 1);
+  assert.equal(d.rejected[0].reason, 'connect ETIMEDOUT 1.2.3.4:50002; connect ENETUNREACH ::1:50002');
+});
+
 test('discovery: DNS seed down → curated still probed, no throw', async () => {
   const d = await discoverServers({
     curated: CURATED,

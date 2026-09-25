@@ -23,6 +23,7 @@ import {
   classifyRejection,
   classifyVerified,
   mergeRun,
+  runnerCannotReach,
 } from './status-lib.mjs';
 
 const NETWORKS = ['mainnet', 'chipnet'];
@@ -99,6 +100,8 @@ async function observe(networkName, prior) {
   }
   for (const rejection of result.rejected) {
     if (observations.some(obs => obs.host === rejection.host)) continue;
+    // Not a measurement of the server: the runner has no route to it.
+    if (runnerCannotReach(rejection.host, rejection.reason)) continue;
     observations.push({
       host: rejection.host,
       state: classifyRejection(rejection.reason),
