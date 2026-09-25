@@ -48,6 +48,9 @@ jobs:
       - name: Run unit and security regressions
         run: npm test
 
+      - name: Type-check the published declarations as a consumer
+        run: npm run test:types
+
       - name: Audit the zero-runtime-dependency package
         if: matrix.node == '24'
         run: npm audit --omit=dev --audit-level=high

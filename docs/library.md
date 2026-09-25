@@ -12,6 +12,11 @@ Browser:
 import { connect } from '@aryarh/cascan/browser';
 ```
 
+TypeScript declarations ship in the package for both entry points; no
+`@types` package is needed. They depend on neither `@types/node` nor the DOM
+lib, and `connect()` rejects `allowInsecureTransport: true` without
+`verify: false` at compile time.
+
 ## `connect(options?) → Promise<Cascan>`
 
 Discovers the server pool (cache → DNS seed + peer gossip + probing →
