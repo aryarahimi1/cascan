@@ -1,0 +1,56 @@
+name: Network status
+
+# Probes the public BCH Fulcrum fleet with cascan's own discovery and
+# publishes a rolling 7-day status file to the orphan `status-data` branch:
+# https://raw.githubusercontent.com/aryarahimi1/cascan/status-data/status.json
+# The branch always holds exactly one commit, so history never accumulates.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: network-status
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    name: Probe and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the monitor
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out the previous status
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: status-data
+          path: status-data
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Probe every known server
+        run: node scripts/status-snapshot.mjs status-data/status.json status-data/status.json
+
+      - name: Publish as a single orphan commit
+        working-directory: status-data
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout --orphan snapshot
+          git add status.json
+          git commit --quiet -m "Network status $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push --force origin snapshot:status-data
